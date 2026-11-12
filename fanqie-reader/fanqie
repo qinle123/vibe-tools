@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 解析软链接指向的真实项目根目录
+REAL_SCRIPT="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+DIR="$(dirname "$REAL_SCRIPT")"
+
+if [ -d "$DIR/.venv" ]; then
+    exec "$DIR/.venv/bin/python3" "$DIR/main.py" "$@"
+elif command -v uv >/dev/null 2>&1; then
+    exec uv run --project "$DIR" python3 "$DIR/main.py" "$@"
+else
+    exec python3 "$DIR/main.py" "$@"
+fi
