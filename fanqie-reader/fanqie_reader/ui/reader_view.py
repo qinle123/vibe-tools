@@ -43,6 +43,7 @@ class ReaderView:
         self._cloud_sync_timer: Optional[threading.Timer] = None
         self._cloud_sync_payload = None
         self._cloud_sync_lock = threading.Lock()
+        self._cloud_sync_error: Optional[str] = None
         self.book = book
         self.chapters = chapters
         progress_item = storage.get_shelf_item(book.book_id)
@@ -196,14 +197,21 @@ class ReaderView:
             book=self.book
         )
         if self.auth.is_logged_in():
+            total_lines = max(1, len(self.formatted_lines))
+            chapter_fraction = min(1.0, max(0.0, self.line_offset / total_lines))
+            book_fraction = (
+                self.chapter_index + chapter_fraction
+            ) / max(1, len(self.chapters))
             self._cloud_sync_payload = {
                 "book_id": self.book.book_id,
                 "item_id": cur_ch.item_id,
-                "read_progress": self.chapter_index,
+                "read_progress": round(book_fraction * 10000),
                 "index": self.chapter_index,
                 "read_timestamp": str(int(time.time())),
                 "genre_type": 0,
             }
+            # 服务端的 read_progress 是整本书的万分比；index 才是章节序号。
+            self._cloud_sync_error = None
             if self._cloud_sync_timer:
                 self._cloud_sync_timer.cancel()
             self._cloud_sync_timer = threading.Timer(0.35, self._sync_cloud_progress)
@@ -217,8 +225,11 @@ class ReaderView:
                 return
             try:
                 self.api.update_cloud_progress(payload, self.auth.get_cookie_header())
-            except Exception:
-                pass
+                self._cloud_sync_payload = None
+                self._cloud_sync_error = None
+            except Exception as exc:
+                # 保留 payload，退出时的 flush 可以再次尝试；不要让失败静默消失。
+                self._cloud_sync_error = str(exc)
 
     def flush_cloud_progress(self) -> None:
         if self._cloud_sync_timer:
@@ -364,135 +375,137 @@ class ReaderView:
 
     def run(self) -> None:
         """主阅读事件循环"""
-        self.load_current_chapter(reset_offset=(self.line_offset == 0))
+        try:
+            self.load_current_chapter(reset_offset=(self.line_offset == 0))
 
-        while True:
-            self.render()
-            key = self.term.read_key(0.5)
-            if not key:
-                continue
+            while True:
+                self.render()
+                key = self.term.read_key(0.5)
+                if not key:
+                    continue
 
-            cols, rows = self.term.get_size()
-            content_rows = max(1, rows - 2)
-            max_offset = max(0, len(self.formatted_lines) - content_rows)
+                cols, rows = self.term.get_size()
+                content_rows = max(1, rows - 2)
+                max_offset = max(0, len(self.formatted_lines) - content_rows)
 
-            # 退出阅读
-            if key in ('q', KEY_ESC):
-                self.save_current_progress()
-                self.flush_cloud_progress()
-                break
+                # 退出阅读
+                if key in ('q', KEY_ESC):
+                    break
 
-            # 方向键只滚动正文，到边界后保持当前章节。
-            elif key in ('j', KEY_DOWN):
-                if self.line_offset < max_offset:
-                    self.line_offset += 1
+                # 方向键只滚动正文，到边界后保持当前章节。
+                elif key in ('j', KEY_DOWN):
+                    if self.line_offset < max_offset:
+                        self.line_offset += 1
+                        self.save_current_progress()
+
+                # 上滚单行
+                elif key in ('k', KEY_UP):
+                    if self.line_offset > 0:
+                        self.line_offset -= 1
+                        self.save_current_progress()
+
+                # 向下翻页 (Space / PageDown)
+                elif key == 'd':
+                    self.scroll_half_page(1)
+
+                # 向上半屏
+                elif key == 'u':
+                    self.scroll_half_page(-1)
+
+                # 向下翻页 (Space / PageDown)
+                elif key in (' ', KEY_PGDN):
+                    if self.line_offset < max_offset:
+                        # 保留 2 行上下文
+                        step = max(1, content_rows - 2)
+                        self.line_offset = min(max_offset, self.line_offset + step)
+                        self.save_current_progress()
+
+                # 向上翻页 (b / PageUp)
+                elif key in ('b', KEY_PGUP):
+                    if self.line_offset > 0:
+                        step = max(1, content_rows - 2)
+                        self.line_offset = max(0, self.line_offset - step)
+                        self.save_current_progress()
+
+                # 跳到本章开头
+                elif key in ('g', KEY_HOME):
+                    self.line_offset = 0
                     self.save_current_progress()
 
-            # 上滚单行
-            elif key in ('k', KEY_UP):
-                if self.line_offset > 0:
-                    self.line_offset -= 1
+                # 跳到本章结尾
+                elif key in ('G', KEY_END):
+                    self.line_offset = max_offset
                     self.save_current_progress()
 
-            # 向下翻页 (Space / PageDown)
-            elif key == 'd':
-                self.scroll_half_page(1)
+                # h / l 在章节间前后移动，方向键始终只控制正文滚动。
+                elif key in ('h', '['):
+                    if self.chapter_index > 0:
+                        self.chapter_index -= 1
+                        self.show_toast(f"切换至: 第 {self.chapter_index + 1} 章")
+                        self.load_current_chapter(reset_offset=True)
+                    else:
+                        self.show_toast("已经是第一章了")
 
-            # 向上半屏
-            elif key == 'u':
-                self.scroll_half_page(-1)
+                # 切下一章
+                elif key in ('l', ']'):
+                    if self.chapter_index < len(self.chapters) - 1:
+                        self.chapter_index += 1
+                        self.show_toast(f"切换至: 第 {self.chapter_index + 1} 章")
+                        self.load_current_chapter(reset_offset=True)
+                    else:
+                        self.show_toast("已经是最新章节了")
 
-            # 向下翻页 (Space / PageDown)
-            elif key in (' ', KEY_PGDN):
-                if self.line_offset < max_offset:
-                    # 保留 2 行上下文
-                    step = max(1, content_rows - 2)
-                    self.line_offset = min(max_offset, self.line_offset + step)
+                # 切换宽度
+                elif key == 'w':
+                    self.width_idx = (self.width_idx + 1) % len(self.WIDTH_PRESETS)
+                    self._update_layout(cols)
+                    self.show_toast(f"排版列宽: {self.WIDTH_PRESETS[self.width_idx]}，当前窗口使用 {self.layout_engine.content_width} 列")
+                    self.line_offset = min(self.line_offset, max(0, len(self.formatted_lines) - content_rows))
                     self.save_current_progress()
 
-            # 向上翻页 (b / PageUp)
-            elif key in ('b', KEY_PGUP):
-                if self.line_offset > 0:
-                    step = max(1, content_rows - 2)
-                    self.line_offset = max(0, self.line_offset - step)
-                    self.save_current_progress()
+                # 加入/移出书架
+                elif key == 'a':
+                    if self.storage.is_in_shelf(self.book.book_id):
+                        self.storage.remove_from_shelf(self.book.book_id)
+                        self.show_toast("已从书架移除")
+                    else:
+                        self.storage.add_to_shelf(self.book)
+                        self.save_current_progress()
+                        self.show_toast("已成功加入书架 ★")
 
-            # 跳到本章开头
-            elif key in ('g', KEY_HOME):
-                self.line_offset = 0
-                self.save_current_progress()
+                # 重新加载
+                elif key == 'r':
+                    self.show_toast("重新加载当前章...")
+                    cur_ch = self.chapters[self.chapter_index]
+                    cache_file = self.storage.cache_dir / self.book.book_id / f"{cur_ch.item_id}.txt"
+                    if cache_file.exists():
+                        cache_file.unlink(missing_ok=True)
+                    self.load_current_chapter(reset_offset=False)
 
-            # 跳到本章结尾
-            elif key in ('G', KEY_END):
-                self.line_offset = max_offset
-                self.save_current_progress()
+                # 在官方网页阅读当前章节
+                elif key == 'o':
+                    if 0 <= self.chapter_index < len(self.chapters):
+                        item_id = self.chapters[self.chapter_index].item_id
+                        try:
+                            opened = webbrowser.open(f"https://fanqienovel.com/reader/{item_id}")
+                            self.show_toast("已在浏览器打开番茄官方章节页" if opened else "无法启动浏览器，请手动打开番茄章节页")
+                        except Exception as exc:
+                            self.show_toast(f"打开官方网页失败: {exc}")
 
-            # h / l 在章节间前后移动，方向键始终只控制正文滚动。
-            elif key in ('h', '['):
-                if self.chapter_index > 0:
-                    self.chapter_index -= 1
-                    self.show_toast(f"切换至: 第 {self.chapter_index + 1} 章")
-                    self.load_current_chapter(reset_offset=True)
-                else:
-                    self.show_toast("已经是第一章了")
+                # 打开目录
+                elif key == 't':
+                    toc = TOCView(self.term, self.chapters, self.chapter_index)
+                    chosen_idx = toc.run()
+                    self._last_frame = None
+                    if chosen_idx is not None and chosen_idx != self.chapter_index:
+                        self.chapter_index = chosen_idx
+                        self.show_toast(f"跳转至: 第 {self.chapter_index + 1} 章")
+                        self.load_current_chapter(reset_offset=True)
 
-            # 切下一章
-            elif key in ('l', ']'):
-                if self.chapter_index < len(self.chapters) - 1:
-                    self.chapter_index += 1
-                    self.show_toast(f"切换至: 第 {self.chapter_index + 1} 章")
-                    self.load_current_chapter(reset_offset=True)
-                else:
-                    self.show_toast("已经是最新章节了")
-
-            # 切换宽度
-            elif key == 'w':
-                self.width_idx = (self.width_idx + 1) % len(self.WIDTH_PRESETS)
-                self._update_layout(cols)
-                self.show_toast(f"排版列宽: {self.WIDTH_PRESETS[self.width_idx]}，当前窗口使用 {self.layout_engine.content_width} 列")
-                self.line_offset = min(self.line_offset, max(0, len(self.formatted_lines) - content_rows))
-                self.save_current_progress()
-
-            # 加入/移出书架
-            elif key == 'a':
-                if self.storage.is_in_shelf(self.book.book_id):
-                    self.storage.remove_from_shelf(self.book.book_id)
-                    self.show_toast("已从书架移除")
-                else:
-                    self.storage.add_to_shelf(self.book)
-                    self.save_current_progress()
-                    self.show_toast("已成功加入书架 ★")
-
-            # 重新加载
-            elif key == 'r':
-                self.show_toast("重新加载当前章...")
-                # 清除当前章本地缓存
-                cur_ch = self.chapters[self.chapter_index]
-                cache_file = self.storage.cache_dir / self.book.book_id / f"{cur_ch.item_id}.txt"
-                if cache_file.exists():
-                    cache_file.unlink(missing_ok=True)
-                self.load_current_chapter(reset_offset=False)
-
-            # 在官方网页阅读当前章节
-            elif key == 'o':
-                if 0 <= self.chapter_index < len(self.chapters):
-                    item_id = self.chapters[self.chapter_index].item_id
-                    try:
-                        opened = webbrowser.open(f"https://fanqienovel.com/reader/{item_id}")
-                        self.show_toast("已在浏览器打开番茄官方章节页" if opened else "无法启动浏览器，请手动打开番茄章节页")
-                    except Exception as exc:
-                        self.show_toast(f"打开官方网页失败: {exc}")
-
-            # 打开目录
-            elif key == 't':
-                toc = TOCView(self.term, self.chapters, self.chapter_index)
-                chosen_idx = toc.run()
-                self._last_frame = None
-                if chosen_idx is not None and chosen_idx != self.chapter_index:
-                    self.chapter_index = chosen_idx
-                    self.show_toast(f"跳转至: 第 {self.chapter_index + 1} 章")
-                    self.load_current_chapter(reset_offset=True)
-
-            # 帮助
-            elif key in ('?', '/'):
-                self.show_help_modal()
+                # 帮助
+                elif key in ('?', '/'):
+                    self.show_help_modal()
+        finally:
+            # q/Esc、Ctrl-C、异常退出都先落本地并同步最后一次云端进度。
+            self.save_current_progress()
+            self.flush_cloud_progress()

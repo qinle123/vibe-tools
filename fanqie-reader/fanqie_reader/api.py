@@ -310,14 +310,18 @@ class FanqieAPI:
         headers = {
             "Cookie": cookie_header,
             "Referer": "https://fanqienovel.com/",
-            "Content-Type": "application/json",
+            "Content-Type": "application/json;charset=UTF-8",
             "Origin": "https://fanqienovel.com",
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": DEFAULT_HEADERS["User-Agent"],
         }
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 result = json.loads(resp.read().decode("utf-8", errors="ignore"))
-            if result.get("code", 0) != 0:
+            # 网页接口有时返回数字 0，有时返回字符串 "0"。
+            code = result.get("code", 0)
+            if str(code) not in {"0", "200"}:
                 raise RuntimeError(result.get("message", "云端进度更新失败"))
         except Exception as e:
             raise RuntimeError(f"更新云端阅读进度失败: {e}")

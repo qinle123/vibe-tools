@@ -99,5 +99,19 @@ class TestAPIIntegration(unittest.TestCase):
         self.assertEqual(request.get_method(), "POST")
         self.assertEqual(json.loads(request.data), payload)
 
+    def test_update_cloud_progress_accepts_string_success_code(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def read(self):
+                return b'{"code":"0","message":"ok"}'
+
+        with patch("fanqie_reader.api.urllib.request.urlopen", return_value=Response()):
+            self.api.update_cloud_progress({"book_id": "101", "item_id": "chapter-2"}, "sessionid=test")
+
 if __name__ == "__main__":
     unittest.main()

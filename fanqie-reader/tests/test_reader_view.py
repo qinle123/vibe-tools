@@ -256,6 +256,53 @@ class TestReaderView(unittest.TestCase):
             self.assertEqual(payload["item_id"], "c2")
             self.assertEqual(payload["index"], 1)
 
+    def test_cloud_progress_uses_book_fraction_and_flushes_on_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StorageManager(directory)
+            book = Book("101", "测试书", chapter_total=4)
+            storage.add_to_shelf(book)
+            api = FanqieAPI()
+            api.get_chapter_content = MagicMock(return_value=("第一章", "正文。" * 300))
+            api.update_cloud_progress = MagicMock()
+            reader = ReaderView(
+                MockTerminal(keys=["j", "q"]), api, storage, book,
+                [Chapter("c1", "第一章"), Chapter("c2", "第二章"), Chapter("c3", "第三章"), Chapter("c4", "第四章")],
+            )
+            reader.auth.is_logged_in = MagicMock(return_value=True)
+            reader.auth.get_cookie_header = MagicMock(return_value="session=test")
+            reader._prefetch_next_chapter = MagicMock()
+
+            reader.run()
+
+            payload = api.update_cloud_progress.call_args.args[0]
+            self.assertEqual(payload["item_id"], "c1")
+            self.assertEqual(payload["index"], 0)
+            self.assertGreater(payload["read_progress"], 0)
+            self.assertLessEqual(payload["read_progress"], 2500)
+            self.assertEqual(api.update_cloud_progress.call_count, 1)
+
+    def test_cloud_progress_flushes_when_reader_loop_raises(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StorageManager(directory)
+            book = Book("101", "测试书")
+            storage.add_to_shelf(book)
+            api = FanqieAPI()
+            terminal = MockTerminal()
+            terminal.read_key = MagicMock(side_effect=RuntimeError("terminal failed"))
+            api.update_cloud_progress = MagicMock()
+            reader = ReaderView(terminal, api, storage, book, [Chapter("c1", "第一章")])
+            reader.auth.is_logged_in = MagicMock(return_value=True)
+            reader.auth.get_cookie_header = MagicMock(return_value="session=test")
+            reader.load_current_chapter = MagicMock()
+            reader.save_current_progress = MagicMock()
+            reader.flush_cloud_progress = MagicMock()
+
+            with self.assertRaisesRegex(RuntimeError, "terminal failed"):
+                reader.run()
+
+            reader.save_current_progress.assert_called()
+            reader.flush_cloud_progress.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
