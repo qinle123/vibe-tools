@@ -97,6 +97,39 @@ class TestSourcesEngine(unittest.TestCase):
             self.assertEqual(storage.get_chapter_cache("b1", "ch_00001"), ("第二章", "正文2"))
             self.assertTrue(storage.is_book_downloaded("b1"))
 
+    def test_start_download_and_cancel_all_downloads(self):
+        import threading
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = StorageManager(tmp)
+            book = Book("b2", "后台书", author="作者")
+            sb = SourceBook("香书小说", "http://www.ibiqugu.net/", "http://www.ibiqugu.net/2/", "后台书", "作者")
+            mgr = SourceManager()
+
+            gate = threading.Event()
+            fake_chapters = [
+                type("Ch", (), {"item_id": f"ch_{i:05d}", "title": f"第{i}章", "index": i, "source_url": f"http://u/{i}", "to_dict": lambda self, i=i: {"item_id": f"ch_{i:05d}", "title": f"第{i}章", "volume_name": "", "index": i, "source_url": f"http://u/{i}"}})()
+                for i in range(4)
+            ]
+
+            def slow_fetch(_rule, _url):
+                gate.wait(timeout=2.0)
+                return "章节", "正文"
+
+            with patch.object(mgr, "fetch_toc", return_value=fake_chapters), patch.object(
+                mgr, "fetch_chapter_content", side_effect=slow_fetch
+            ):
+                task = mgr.start_download(sb, storage, book, max_workers=1)
+                deadline = time.monotonic() + 1.0
+                while task.status == "fetching_toc" and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(mgr.get_download_task("b2"), task)
+                mgr.cancel_all_downloads()
+                gate.set()
+                self.assertTrue(task.done_event.wait(timeout=2.0))
+                self.assertEqual(task.status, "cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()

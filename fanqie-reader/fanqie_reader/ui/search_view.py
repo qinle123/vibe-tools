@@ -113,32 +113,35 @@ class SearchView:
             self.storage.add_to_shelf(book)
             return book
 
+        # 先加入书架，确保后台静默下载时书架立即可见进度
+        self.storage.add_to_shelf(book)
+        task = self.source_manager.start_download(sb, self.storage, book)
+
         self.is_searching = True
         self.error_msg = ""
-        self.search_status = f"正在从 [{sb.source_name}] 获取《{sb.title}》目录..."
-        self.render()
-
-        last_render = [0.0]
-
-        def _on_dl_progress(done: int, total: int, ch_title: str, failed: int) -> None:
-            now = time.monotonic()
-            if done == total or now - last_render[0] >= 0.15:
-                pct = int(done / max(1, total) * 100)
-                fail_note = f" (失败 {failed})" if failed else ""
-                self.search_status = f"下载分章 [{sb.source_name}] {done}/{total} ({pct}%){fail_note}"
-                self.render()
-                last_render[0] = now
-
         try:
-            self.source_manager.download_book(sb, self.storage, book, progress_cb=_on_dl_progress)
-            self.is_searching = False
-            self.search_status = ""
-            return book
-        except Exception as e:
-            self.is_searching = False
-            self.search_status = ""
-            self.show_toast(f"下载失败: {e}")
+            while not task.done_event.wait(0.1):
+                if task.status == "fetching_toc":
+                    self.search_status = f"[{sb.source_name}] 解析目录... [Esc后台下载]"
+                else:
+                    fail_note = f" 失{task.failed}" if task.failed else ""
+                    self.search_status = (
+                        f"下载 [{sb.source_name}] {task.done}/{task.total} ({task.percent}%){fail_note} [Esc后台]"
+                    )
+                self.render()
+                key = self.term.read_key(0.05)
+                if key == KEY_ESC:
+                    # 退出搜书页但保留后台任务静默继续下载
+                    return None
+
+            if task.status == "done":
+                return book
+            if task.status == "error":
+                self.show_toast(f"下载失败: {task.error}")
             return None
+        finally:
+            self.is_searching = False
+            self.search_status = ""
 
     def _adjust_scroll(self, list_height: int) -> None:
         if self.cursor_pos < self.top_offset:

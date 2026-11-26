@@ -1,11 +1,13 @@
 from __future__ import annotations
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -164,6 +166,32 @@ def score_match(item: SourceBook, target_title: str, target_author: str = "") ->
     return score
 
 
+@dataclass
+class DownloadTask:
+    """Tracks a background or foreground book download task."""
+    book_id: str
+    source_name: str
+    status: str = "fetching_toc"  # fetching_toc | downloading | done | error | cancelled
+    done: int = 0
+    total: int = 0
+    failed: int = 0
+    current_chapter: str = ""
+    error: str = ""
+    chapters: List[Chapter] = field(default_factory=list)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    done_event: threading.Event = field(default_factory=threading.Event)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in ("fetching_toc", "downloading")
+
+    @property
+    def percent(self) -> int:
+        if self.total <= 0:
+            return 0
+        return min(100, int(self.done / self.total * 100))
+
+
 class SourceManager:
     """so-novel 书源规则引擎与多线程下载器"""
 
@@ -177,6 +205,8 @@ class SourceManager:
         self.timeout = timeout
         self.retries = retries
         self.rules: List[Dict[str, Any]] = self._load_rules(rules_path, user_rules_path)
+        self._downloads: Dict[str, DownloadTask] = {}
+        self._downloads_lock = threading.Lock()
 
     @staticmethod
     def _load_rules(
@@ -632,6 +662,7 @@ class SourceManager:
         book: Book,
         progress_cb: Optional[Callable[[int, int, str, int], None]] = None,
         max_workers: int = 6,
+        cancel_event: Optional[threading.Event] = None,
     ) -> List[Chapter]:
         """Download full book from a source, split by chapters, and persist locally."""
         rule = self.get_rule_by_name(source_book.source_name)
@@ -641,6 +672,9 @@ class SourceManager:
         chapters = self.fetch_toc(rule, source_book.book_url)
         if not chapters:
             raise RuntimeError(f"书源 [{source_book.source_name}] 未解析到章节目录")
+
+        if cancel_event and cancel_event.is_set():
+            return []
 
         # 换源或重新下载时清空旧章节缓存，避免残留混杂
         storage.clear_book_cache(book.book_id)
@@ -659,14 +693,22 @@ class SourceManager:
         total = len(chapters)
         done = 0
         failed = 0
+        if progress_cb:
+            progress_cb(0, total, chapters[0].title, 0)
 
         def _download_one(ch: Chapter) -> Tuple[Chapter, str, str]:
+            if cancel_event and cancel_event.is_set():
+                return ch, ch.title, ""
             title, content = self.fetch_chapter_content(rule, ch.source_url)
             return ch, (title or ch.title), content
 
         with ThreadPoolExecutor(max_workers=min(max_workers, max(1, total))) as pool:
             futures = {pool.submit(_download_one, ch): ch for ch in chapters}
             for fut in as_completed(futures):
+                if cancel_event and cancel_event.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    break
                 ch = futures[fut]
                 done += 1
                 try:
@@ -681,3 +723,62 @@ class SourceManager:
                     progress_cb(done, total, ch.title, failed)
 
         return chapters
+
+    def get_download_task(self, book_id: str) -> Optional[DownloadTask]:
+        with self._downloads_lock:
+            return self._downloads.get(book_id)
+
+    def start_download(
+        self,
+        source_book: SourceBook,
+        storage: StorageManager,
+        book: Book,
+        max_workers: int = 6,
+    ) -> DownloadTask:
+        """Start (or return active) background download task for a book."""
+        with self._downloads_lock:
+            existing = self._downloads.get(book.book_id)
+            if existing and existing.is_active:
+                return existing
+            task = DownloadTask(book_id=book.book_id, source_name=source_book.source_name)
+            self._downloads[book.book_id] = task
+
+        def _worker() -> None:
+            def _on_progress(done: int, total: int, ch_title: str, failed: int) -> None:
+                task.status = "downloading"
+                task.done = done
+                task.total = total
+                task.current_chapter = ch_title
+                task.failed = failed
+
+            try:
+                chapters = self.download_book(
+                    source_book,
+                    storage,
+                    book,
+                    progress_cb=_on_progress,
+                    max_workers=max_workers,
+                    cancel_event=task.cancel_event,
+                )
+                if task.cancel_event.is_set():
+                    task.status = "cancelled"
+                else:
+                    task.chapters = chapters
+                    task.status = "done"
+            except Exception as exc:
+                task.error = str(exc)
+                task.status = "error"
+            finally:
+                task.done_event.set()
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        return task
+
+    def cancel_all_downloads(self) -> None:
+        """Signal all active background downloads to stop cleanly on app exit."""
+        with self._downloads_lock:
+            tasks = list(self._downloads.values())
+        for task in tasks:
+            if task.is_active:
+                task.cancel_event.set()

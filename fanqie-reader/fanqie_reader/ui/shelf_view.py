@@ -178,9 +178,15 @@ class ShelfView:
                     cur_ch_str = item.last_chapter_title or f"第 {item.last_chapter_index + 1} 章"
                     pct_str = f"{item.progress_percent():.1f}%"
                     total_str = f"共{item.book.chapter_total}章" if item.book.chapter_total else ""
-                    dl_tag = f"已下载·{item.book.source_name}" if self.storage.is_book_downloaded(item.book.book_id) and item.book.source_name else (
-                        "已下载" if self.storage.is_book_downloaded(item.book.book_id) else "未下载"
-                    )
+                    dl_task = self.source_manager.get_download_task(item.book.book_id)
+                    if dl_task and dl_task.is_active:
+                        dl_tag = "解析目录中" if dl_task.status == "fetching_toc" else f"下载中 {dl_task.percent}%"
+                    elif self.storage.is_book_downloaded(item.book.book_id) and item.book.source_name:
+                        dl_tag = f"已下载·{item.book.source_name}"
+                    elif self.storage.is_book_downloaded(item.book.book_id):
+                        dl_tag = "已下载"
+                    else:
+                        dl_tag = "未下载"
 
                     progress_info = f"[{dl_tag} | {cur_ch_str} {pct_str} {total_str}]"
                     time_info = format_relative_time(item.last_read_time) + " "
@@ -334,11 +340,20 @@ class ShelfView:
             if text_item:
                 item = text_item
 
-        # 本地尚未下载时，第一次进去引导搜索同名同作者源并下载分章
+        # 本地尚未下载时，先检查是否已有后台静默下载任务，否则引导搜索下载
         if not self.storage.is_book_downloaded(item.book.book_id):
+            dl_task = self.source_manager.get_download_task(item.book.book_id)
+            if dl_task and dl_task.is_active:
+                self.show_toast(
+                    f"《{item.book.title}》正在后台下载 ({dl_task.done}/{dl_task.total})，请稍候..."
+                )
+                return
             downloaded = self._switch_book_source(item.book, is_switch_source=False)
             if not downloaded:
-                self.show_toast("已取消下载")
+                if (t := self.source_manager.get_download_task(item.book.book_id)) and t.is_active:
+                    self.show_toast(f"《{item.book.title}》已转入后台静默下载")
+                else:
+                    self.show_toast("已取消下载")
                 return
             _, chapters = downloaded
             item = self.storage.get_shelf_item(item.book.book_id) or item
@@ -494,6 +509,8 @@ class ShelfView:
                             shelf_item = self.storage.get_shelf_item(new_book.book_id)
                             if shelf_item:
                                 self._open_book_reader(shelf_item)
+                        elif any(t.is_active for t in getattr(self.source_manager, "_downloads", {}).values()):
+                            self.show_toast("已转入后台静默下载，可在书架查看进度")
 
                     # 按 c：换源 / 重新下载选中书籍
                     elif key == 'c':

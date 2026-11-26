@@ -199,6 +199,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        source_manager.cancel_all_downloads()
         term.restore_mode()
 
 if __name__ == "__main__":

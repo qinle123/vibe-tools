@@ -85,41 +85,38 @@ class DownloadView:
         finally:
             self.is_busy = False
 
-    def _download_selected(self) -> Optional[Tuple[Book, List[Chapter]]]:
+    def _download_selected(self) -> Tuple[Optional[Tuple[Book, List[Chapter]]], bool]:
+        """Download selected source. Returns (result_or_none, backgrounded)."""
         if not (0 <= self.cursor_pos < len(self.results)):
-            return None
+            return None, False
         chosen = self.results[self.cursor_pos]
+        self.storage.add_to_shelf(self.book)
+        task = self.source_manager.start_download(chosen, self.storage, self.book)
+
         self.is_busy = True
         self.error_msg = ""
-        self.status_msg = f"正在从 [{chosen.source_name}] 获取目录..."
-        self.render()
-
-        last_render = [0.0]
-
-        def _on_dl_progress(done: int, total: int, ch_title: str, failed: int) -> None:
-            now = time.monotonic()
-            if done == total or now - last_render[0] >= 0.15:
-                pct = int(done / max(1, total) * 100)
-                fail_note = f" (失败 {failed})" if failed else ""
-                self.status_msg = (
-                    f"正在下载分章 [{chosen.source_name}] {done}/{total} ({pct}%){fail_note} · {ch_title}"
-                )
-                self.render()
-                last_render[0] = now
-
         try:
-            chapters = self.source_manager.download_book(
-                chosen,
-                self.storage,
-                self.book,
-                progress_cb=_on_dl_progress,
-            )
+            while not task.done_event.wait(0.1):
+                if task.status == "fetching_toc":
+                    self.status_msg = f"正在从 [{chosen.source_name}] 获取目录... (按 Esc/q 转后台静默下载)"
+                else:
+                    fail_note = f" (失败 {task.failed})" if task.failed else ""
+                    self.status_msg = (
+                        f"下载分章 [{chosen.source_name}] {task.done}/{task.total} ({task.percent}%){fail_note}"
+                        f" · {task.current_chapter} [Esc转后台]"
+                    )
+                self.render()
+                key = self.term.read_key(0.05)
+                if key in ("q", KEY_ESC):
+                    return None, True
+
+            if task.status == "done":
+                return (self.book, task.chapters), False
+            if task.status == "error":
+                self.error_msg = f"下载失败 [{chosen.source_name}]: {task.error}"
+            return None, False
+        finally:
             self.is_busy = False
-            return self.book, chapters
-        except Exception as e:
-            self.is_busy = False
-            self.error_msg = f"下载失败 [{chosen.source_name}]: {e}"
-            return None
 
     def render(self) -> None:
         cols, rows = self.term.get_size()
@@ -268,8 +265,10 @@ class DownloadView:
                 elif key == "r":
                     self._search_sources()
                 elif key == KEY_ENTER:
-                    res = self._download_selected()
+                    res, backgrounded = self._download_selected()
                     if res is not None:
                         return res
+                    if backgrounded:
+                        return None
         finally:
             self.term.hide_cursor()

@@ -99,14 +99,18 @@ class TestSearchView(unittest.TestCase):
         self.assertTrue(self.storage.is_in_shelf(make_local_book_id("剑来", "烽火戏诸侯")))
 
     def test_open_book_from_list_enter_downloads_and_returns_book(self):
-        def fake_download(_sb, storage, book, progress_cb=None):
+        from fanqie_reader.sources import DownloadTask
+
+        def fake_start(_sb, storage, book):
             ch = Chapter("ch_00000", "第一章", index=0)
             storage.save_chapters_meta(book.book_id, [ch])
             storage.save_chapter_cache(book.book_id, ch.item_id, ch.title, "正文内容")
             storage.add_to_shelf(book)
-            return [ch]
+            task = DownloadTask(book_id=book.book_id, source_name="香书小说", status="done", done=1, total=1, chapters=[ch])
+            task.done_event.set()
+            return task
 
-        self.mock_source.download_book.side_effect = fake_download
+        self.mock_source.start_download.side_effect = fake_start
         keys = [
             'j', 'i', 'a', 'n', KEY_ENTER,
             KEY_ENTER
@@ -118,6 +122,21 @@ class TestSearchView(unittest.TestCase):
         self.assertIsNotNone(chosen)
         self.assertEqual(chosen.title, "剑来")
         self.assertTrue(self.storage.is_book_downloaded(chosen.book_id))
+
+    def test_esc_during_download_returns_to_shelf_without_cancelling_task(self):
+        from fanqie_reader.sources import DownloadTask
+
+        task = DownloadTask(book_id=make_local_book_id("剑来", "烽火戏诸侯"), source_name="香书小说", status="downloading", done=3, total=10)
+        self.mock_source.start_download.return_value = task
+
+        keys = ['j', 'i', 'a', 'n', KEY_ENTER, KEY_ENTER, KEY_ESC]
+        mock_term = MockTerminal(keys)
+        view = SearchView(mock_term, self.mock_source, self.storage)
+        chosen = view.run()
+
+        self.assertIsNone(chosen)
+        self.assertFalse(task.cancel_event.is_set())
+        self.assertTrue(self.storage.is_in_shelf(task.book_id))
 
     def test_all_views_fit_narrow_terminal_without_wrapping_or_stale_rows(self):
         import re
