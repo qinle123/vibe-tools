@@ -119,6 +119,47 @@ class TestSearchView(unittest.TestCase):
         self.assertEqual(chosen.title, "剑来")
         self.assertTrue(self.storage.is_book_downloaded(chosen.book_id))
 
+    def test_all_views_fit_narrow_terminal_without_wrapping_or_stale_rows(self):
+        import re
+        from fanqie_reader.ui.download_view import DownloadView
+        from fanqie_reader.ui.shelf_view import ShelfView
+        from fanqie_reader.ui.toc_view import TOCView
+        from fanqie_reader.text_engine import str_visual_width
+
+        cols, rows = 66, 22
+
+        class NarrowTerm(MockTerminal):
+            def get_size(self):
+                return cols, rows
+
+        def assert_frame_clean(frame: str, name: str):
+            self.assertTrue(frame.endswith("\033[J"), f"{name} missing \\033[J")
+            lines = frame.split("\n")
+            self.assertEqual(len(lines), rows, f"{name} row count mismatch: {len(lines)} != {rows}")
+            for idx, line in enumerate(lines):
+                plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
+                self.assertLessEqual(
+                    str_visual_width(plain),
+                    cols - 1,
+                    f"{name} line {idx + 1} overflowed: {plain!r}",
+                )
+
+        sv = SearchView(NarrowTerm([]), self.mock_source, self.storage)
+        sv.render()
+        assert_frame_clean(sv.term.output[-1], "SearchView")
+
+        dv = DownloadView(NarrowTerm([]), self.mock_source, self.storage, Book("101", "诡舍", "作者"))
+        dv.render()
+        assert_frame_clean(dv.term.output[-1], "DownloadView")
+
+        shv = ShelfView(NarrowTerm([]), MagicMock(), self.storage, MagicMock())
+        shv.render()
+        assert_frame_clean(shv.term.output[-1], "ShelfView")
+
+        tv = TOCView(NarrowTerm([]), [Chapter("c1", "第一章 测试标题")], 0)
+        tv.render()
+        assert_frame_clean(tv.term.output[-1], "TOCView")
+
 
 if __name__ == "__main__":
     unittest.main()

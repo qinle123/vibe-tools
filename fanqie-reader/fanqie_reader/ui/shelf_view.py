@@ -108,40 +108,42 @@ class ShelfView:
 
     def render(self) -> None:
         cols, rows = self.term.get_size()
+        cols, rows = max(1, cols), max(1, rows)
+        safe_width = max(1, cols - 1)
         display_items = self._get_display_items()
 
-        # 计算可用高度
+        # 计算可用高度: 顶部栏(1) + 过滤栏(0或2) + 列表 + 底部栏(1) = rows
         header_lines = 3 if self.filter_mode else 1
-        list_height = max(1, rows - 2 - header_lines)
+        list_height = max(1, rows - 1 - header_lines)
 
-        buffer = []
-        buffer.append("\033[H")
+        buffer = ["\033[H"]
 
         # 1. 顶部标题栏
         auth_status = f"● {self.auth.get_display_name()}" if self.auth.is_logged_in() else "○ 未登录"
         top_title = f" 📚 番茄小说 · 书架 [{auth_status}]"
         top_meta = f"已藏 {len(self.shelf_items)} 本 "
-        gap = max(1, cols - str_visual_width(top_title) - str_visual_width(top_meta))
+        gap = max(1, safe_width - str_visual_width(top_title) - str_visual_width(top_meta))
         header = top_title + (" " * gap) + top_meta
-        buffer.append(f"{INVERSE}{BOLD}{truncate_to_width(header, cols)}{RESET}\n")
+        buffer.append(f"\033[K{INVERSE}{BOLD}{pad_to_width(truncate_to_width(header, safe_width), safe_width)}{RESET}\n")
 
         # 2. 如果处于过滤模式，显示过滤条
         if self.filter_mode:
             f_prefix = " 🔍 过滤书架: "
             f_p_w = str_visual_width(f_prefix)
-            f_hint = f"匹配 {len(display_items)} 本 [回车阅读 | ↑/↓挑选 | ESC退出]"
+            f_hint = f"匹配 {len(display_items)} 本 [Enter阅读 | ESC退出]"
             f_h_w = str_visual_width(f_hint)
-            f_gap = max(1, cols - f_p_w - str_visual_width(self.filter_query) - f_h_w)
-            f_line = f_prefix + f"{FG_YELLOW}{BOLD}{self.filter_query}{RESET}" + (" " * f_gap) + f"{FG_GRAY}{f_hint}{RESET}"
-            buffer.append(f"\033[K{truncate_to_width(f_line, cols)}\n")
-            buffer.append(f"\033[K{FG_GRAY}{'─' * cols}{RESET}\n")
+            f_q = truncate_to_width(self.filter_query, max(4, safe_width - f_p_w - f_h_w - 1))
+            f_gap = max(1, safe_width - f_p_w - str_visual_width(f_q) - f_h_w)
+            f_line = f_prefix + f"{FG_YELLOW}{BOLD}{f_q}{RESET}" + (" " * f_gap) + f"{FG_GRAY}{f_hint}{RESET}"
+            buffer.append(f"\033[K{f_line}\n")
+            buffer.append(f"\033[K{FG_GRAY}{'─' * safe_width}{RESET}\n")
 
         # 3. 书架内容列表
         if not display_items:
-            pad_y = max(1, list_height // 2 - 2)
+            pad_y = max(0, list_height // 2 - 2)
             for _ in range(pad_y):
                 buffer.append("\033[K\n")
-            
+
             if self.filter_mode and self.filter_query:
                 guide_lines = [
                     f"{FG_YELLOW}未在书架中找到匹配《{self.filter_query}》的书籍{RESET}",
@@ -156,9 +158,9 @@ class ShelfView:
                     f"按 {FG_GRAY}[q]{RESET} 退出程序。"
                 ]
             for gline in guide_lines:
-                pad_x = max(0, (cols - str_visual_width(gline)) // 2)
-                buffer.append(f"\033[K" + " " * pad_x + gline + "\n")
-            
+                pad_x = max(0, (safe_width - str_visual_width(gline)) // 2)
+                buffer.append("\033[K" + " " * pad_x + gline + "\n")
+
             for _ in range(max(0, list_height - pad_y - len(guide_lines))):
                 buffer.append("\033[K\n")
         else:
@@ -169,11 +171,10 @@ class ShelfView:
                     item = visible_items[v_idx]
                     is_selected = (real_idx == self.cursor_pos)
 
-                    # 格式化各列
                     idx_str = f" {real_idx + 1:2d}. "
                     title_str = f"《{item.book.title}》"
                     author_str = f" {item.book.author}" if item.book.author else ""
-                    
+
                     cur_ch_str = item.last_chapter_title or f"第 {item.last_chapter_index + 1} 章"
                     pct_str = f"{item.progress_percent():.1f}%"
                     total_str = f"共{item.book.chapter_total}章" if item.book.chapter_total else ""
@@ -189,10 +190,9 @@ class ShelfView:
 
                     l_w = str_visual_width(left_col)
                     r_w = str_visual_width(right_col)
-                    line_gap = max(1, cols - l_w - r_w)
+                    line_gap = max(1, safe_width - l_w - r_w)
                     full_line = left_col + (" " * line_gap) + right_col
-                    full_line = truncate_to_width(full_line, cols)
-                    full_line = pad_to_width(full_line, cols)
+                    full_line = pad_to_width(truncate_to_width(full_line, safe_width), safe_width)
 
                     if is_selected:
                         buffer.append(f"\033[K{BG_BLUE}{FG_WHITE}{BOLD}{full_line}{RESET}\n")
@@ -205,29 +205,28 @@ class ShelfView:
         if self.confirm_delete_id:
             del_item = self.storage.get_shelf_item(self.confirm_delete_id)
             book_name = del_item.book.title if del_item else ""
-            warn_text = f" ⚠ 确认将《{book_name}》从书架移除？(按 y 确认，其他键取消)"
-            warn_line = f"{BG_DARK_GRAY}{FG_YELLOW}{BOLD}{warn_text}{RESET}"
-            buffer.append(warn_line + (" " * max(0, cols - str_visual_width(warn_text))))
+            warn_text = truncate_to_width(f" ⚠ 确认将《{book_name}》从书架移除？(按 y 确认，其他键取消)", safe_width)
+            buffer.append(f"\033[K{BG_DARK_GRAY}{FG_YELLOW}{BOLD}{pad_to_width(warn_text, safe_width)}{RESET}\033[J")
         elif self.toast_msg and time.time() < self.toast_time:
-            t_line = f" {FG_GREEN}✔ {self.toast_msg}{RESET}"
-            t_line += " " * max(0, cols - str_visual_width(f" ✔ {self.toast_msg}"))
-            buffer.append(f"{INVERSE}{t_line}{RESET}")
+            t_text = truncate_to_width(f" ✔ {self.toast_msg}", safe_width)
+            buffer.append(f"\033[K{INVERSE}{FG_GREEN}{pad_to_width(t_text, safe_width)}{RESET}\033[J")
         else:
             if self.filter_mode:
-                b_left = " [Enter]阅读选中书籍  [↑/↓]挑选匹配项  [ESC]退出过滤模式"
-                b_right = " 模式: 书架快速过滤 "
+                b_left = " [Enter]阅读  [↑/↓]选书  [ESC]退出过滤"
+                b_right = " 过滤模式 "
             else:
-                b_left = " [Enter]阅读  [/]过滤  [s]搜书下载  [c]换源  [S]同步手机  [L]登录  [t]目录  [d]移除"
+                b_left = " [Enter]阅读 [/]过滤 [s]搜书 [c]换源 [S]同步 [L]登录 [t]目录 [d]移除"
                 b_right = " [q]退出 "
-            b_gap = max(1, cols - str_visual_width(b_left) - str_visual_width(b_right))
+            if str_visual_width(b_left) + str_visual_width(b_right) + 1 > safe_width:
+                b_right = ""
+            b_gap = max(0, safe_width - str_visual_width(b_left) - str_visual_width(b_right))
             footer = b_left + (" " * b_gap) + b_right
-            buffer.append(f"{INVERSE}{truncate_to_width(footer, cols)}{RESET}")
+            buffer.append(f"\033[K{INVERSE}{pad_to_width(truncate_to_width(footer, safe_width), safe_width)}{RESET}\033[J")
 
         self.term.write("".join(buffer))
         if self.filter_mode:
-            # 物理光标定位到过滤输入文字末尾，使输入法候选框准确弹出
             f_p_w = str_visual_width(" 🔍 过滤书架: ")
-            cur_col = min(cols, 1 + f_p_w + str_visual_width(self.filter_query))
+            cur_col = min(safe_width, 1 + f_p_w + str_visual_width(self.filter_query))
             self.term.move_cursor(cur_col, 2)
             self.term.show_cursor()
         else:
@@ -370,7 +369,7 @@ class ShelfView:
 
                 cols, rows = self.term.get_size()
                 header_lines = 3 if self.filter_mode else 1
-                list_height = max(1, rows - 2 - header_lines)
+                list_height = max(1, rows - 1 - header_lines)
                 display_items = self._get_display_items()
 
                 # 正在处于删除确认态

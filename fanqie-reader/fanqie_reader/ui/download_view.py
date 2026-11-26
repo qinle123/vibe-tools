@@ -123,6 +123,8 @@ class DownloadView:
 
     def render(self) -> None:
         cols, rows = self.term.get_size()
+        cols, rows = max(1, cols), max(1, rows)
+        safe_width = max(1, cols - 1)
         list_height = max(1, rows - 5)
 
         buffer = ["\033[H"]
@@ -132,27 +134,30 @@ class DownloadView:
         author_label = f" · {self.book.author}" if self.book.author else ""
         cur_src = f"当前源: {self.book.source_name} " if self.book.source_name else "本地未下载 "
         top_title = f" ⬇ {mode_label}: 《{self.book.title}》{author_label}"
-        gap = max(1, cols - str_visual_width(top_title) - str_visual_width(cur_src))
+        gap = max(1, safe_width - str_visual_width(top_title) - str_visual_width(cur_src))
         header = top_title + (" " * gap) + cur_src
-        buffer.append(f"{INVERSE}{BOLD}{truncate_to_width(header, cols)}{RESET}\n")
+        buffer.append(f"\033[K{INVERSE}{BOLD}{pad_to_width(truncate_to_width(header, safe_width), safe_width)}{RESET}\n")
 
         # 2. 搜索词 / 状态栏
         if self.editing_query:
             prompt = " 修改搜索词: "
-            hint = "[Enter 重新搜索 | Esc 取消]"
-            q_gap = max(1, cols - str_visual_width(prompt) - str_visual_width(self.query) - str_visual_width(hint))
-            line2 = f"{prompt}{FG_YELLOW}{BOLD}{self.query}{RESET}{' ' * q_gap}{FG_GRAY}{hint}{RESET}"
+            hint = "[Enter重搜 | Esc取消]"
+            avail_q = max(4, safe_width - str_visual_width(prompt) - str_visual_width(hint) - 1)
+            q_disp = truncate_to_width(self.query, avail_q)
+            q_gap = max(1, safe_width - str_visual_width(prompt) - str_visual_width(q_disp) - str_visual_width(hint))
+            line2 = f"{prompt}{FG_YELLOW}{BOLD}{q_disp}{RESET}{' ' * q_gap}{FG_GRAY}{hint}{RESET}"
+            buffer.append(f"\033[K{line2}\n")
         else:
-            line2 = f" {FG_CYAN}{self.status_msg or '请选择书源并按 Enter 下载'}{RESET}"
-        buffer.append(f"\033[K{truncate_to_width(line2, cols)}\n")
-        buffer.append(f"\033[K{FG_GRAY}{'─' * cols}{RESET}\n")
+            status_txt = truncate_to_width(self.status_msg or "请选择书源并按 Enter 下载", max(1, safe_width - 1))
+            buffer.append(f"\033[K {FG_CYAN}{status_txt}{RESET}\n")
+        buffer.append(f"\033[K{FG_GRAY}{'─' * safe_width}{RESET}\n")
 
         # 3. 书源列表
         if self.error_msg:
-            pad_y = max(1, list_height // 2)
+            pad_y = max(0, list_height // 2)
             for _ in range(pad_y):
                 buffer.append("\033[K\n")
-            buffer.append(f"\033[K  {FG_RED}{truncate_to_width(self.error_msg, cols - 4)}{RESET}\n")
+            buffer.append(f"\033[K  {FG_RED}{truncate_to_width(self.error_msg, max(1, safe_width - 4))}{RESET}\n")
             for _ in range(max(0, list_height - pad_y - 1)):
                 buffer.append("\033[K\n")
         else:
@@ -174,7 +179,7 @@ class DownloadView:
                     author_tag = f"({sb.author})" if sb.author else ""
                     latest_tag = f" · {sb.latest_chapter}" if sb.latest_chapter else ""
                     line_txt = f" {real_idx + 1:2d}. {badge} {src_tag} 《{sb.title}》{author_tag}{latest_tag}"
-                    line_txt = pad_to_width(truncate_to_width(line_txt, cols), cols)
+                    line_txt = pad_to_width(truncate_to_width(line_txt, safe_width), safe_width)
 
                     if is_selected:
                         buffer.append(f"\033[K{BG_BLUE}{FG_WHITE}{BOLD}{line_txt}{RESET}\n")
@@ -186,19 +191,21 @@ class DownloadView:
                     buffer.append("\033[K\n")
 
         # 4. 底部操作栏
-        buffer.append(f"\033[K{FG_GRAY}{'─' * cols}{RESET}\n")
+        buffer.append(f"\033[K{FG_GRAY}{'─' * safe_width}{RESET}\n")
         if self.editing_query:
             b_left = " [Enter]重新搜索  [Esc]取消编辑"
         else:
-            b_left = " [Enter]下载并分章  [↑/↓]选择书源  [/]改词重搜  [r]刷新"
+            b_left = " [Enter]下载分章  [↑/↓]选源  [/]改词  [r]刷新"
         b_right = " [Esc/q]返回 "
-        b_gap = max(1, cols - str_visual_width(b_left) - str_visual_width(b_right))
+        if str_visual_width(b_left) + str_visual_width(b_right) + 1 > safe_width:
+            b_right = ""
+        b_gap = max(0, safe_width - str_visual_width(b_left) - str_visual_width(b_right))
         footer = b_left + (" " * b_gap) + b_right
-        buffer.append(f"{INVERSE}{truncate_to_width(footer, cols)}{RESET}")
+        buffer.append(f"\033[K{INVERSE}{pad_to_width(truncate_to_width(footer, safe_width), safe_width)}{RESET}\033[J")
 
         self.term.write("".join(buffer))
         if self.editing_query:
-            cur_col = min(cols, 1 + str_visual_width(" 修改搜索词: ") + str_visual_width(self.query))
+            cur_col = min(safe_width, 1 + str_visual_width(" 修改搜索词: ") + str_visual_width(self.query))
             self.term.move_cursor(cur_col, 2)
             self.term.show_cursor()
         else:

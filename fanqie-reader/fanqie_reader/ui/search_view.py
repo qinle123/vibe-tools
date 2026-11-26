@@ -148,46 +148,48 @@ class SearchView:
 
     def render(self) -> None:
         cols, rows = self.term.get_size()
-        preview_height = 5
-        list_height = max(1, rows - 5 - preview_height)
+        cols, rows = max(1, cols), max(1, rows)
+        safe_width = max(1, cols - 1)
+        # 固定行: 标题(1) + 搜索栏(1) + 上分隔线(1) + 下分隔线(1) + 预览(2) + 底栏(1) = 7
+        list_height = max(1, rows - 7)
 
         buffer = ["\033[H"]
 
         # 1. 顶部标题栏
         top_title = " 🔍 全网小说搜索下载"
         top_meta = f"so-novel 多书源 ({len(self.source_manager.rules)}源) "
-        gap = max(1, cols - str_visual_width(top_title) - str_visual_width(top_meta))
+        gap = max(1, safe_width - str_visual_width(top_title) - str_visual_width(top_meta))
         header = top_title + (" " * gap) + top_meta
-        buffer.append(f"{INVERSE}{BOLD}{truncate_to_width(header, cols)}{RESET}\n")
+        buffer.append(f"\033[K{INVERSE}{BOLD}{pad_to_width(truncate_to_width(header, safe_width), safe_width)}{RESET}\n")
 
         # 2. 搜索输入框
         prompt = " 输入书名/作者: "
         disp_q = self.query
         if self.focus == "input":
             q_color = f"{FG_YELLOW}{BOLD}"
-            box_hint = "[回车重新搜索 ↵ | ↓ 选书]" if self.results else "[回车搜索 ↵]"
+            box_hint = "[回车重搜 | ↓选书]" if self.results else "[回车搜索 ↵]"
         else:
             q_color = f"{FG_WHITE}"
-            box_hint = "[↑/↓ j/k 选书 | Tab 编辑]"
+            box_hint = "[↑/↓选书 | Tab编辑]"
 
-        status_info = self.search_status if self.is_searching else f"共找到 {len(self.results)} 条  {box_hint}"
+        status_info = self.search_status if self.is_searching else f"共{len(self.results)}条 {box_hint}"
 
         p_w = str_visual_width(prompt)
         s_w = str_visual_width(status_info)
-        avail_q_w = max(10, cols - p_w - s_w - 2)
+        avail_q_w = max(4, safe_width - p_w - s_w - 2)
         q_text = truncate_to_width(disp_q, avail_q_w)
 
-        s_gap = max(1, cols - p_w - str_visual_width(q_text) - s_w)
-        search_bar = prompt + f"{q_color}{q_text}{RESET}" + (" " * s_gap) + f"{FG_GRAY}{status_info}{RESET}"
+        s_gap = max(1, safe_width - p_w - str_visual_width(q_text) - s_w)
+        search_bar = prompt + f"{q_color}{q_text}{RESET}" + (" " * s_gap) + f"{FG_GRAY}{truncate_to_width(status_info, max(1, safe_width - p_w - str_visual_width(q_text) - 1))}{RESET}"
         buffer.append(f"\033[K{search_bar}\n")
-        buffer.append(f"\033[K{FG_GRAY}{'─' * cols}{RESET}\n")
+        buffer.append(f"\033[K{FG_GRAY}{'─' * safe_width}{RESET}\n")
 
         # 3. 搜索结果列表
         if self.error_msg:
-            pad_y = max(1, list_height // 2)
+            pad_y = max(0, list_height // 2)
             for _ in range(pad_y):
                 buffer.append("\033[K\n")
-            buffer.append(f"\033[K  {FG_RED}{self.error_msg}{RESET}\n")
+            buffer.append(f"\033[K  {FG_RED}{truncate_to_width(self.error_msg, max(1, safe_width - 2))}{RESET}\n")
             for _ in range(max(0, list_height - pad_y - 1)):
                 buffer.append("\033[K\n")
         else:
@@ -207,7 +209,7 @@ class SearchView:
                         in_shelf = "+可下载"
 
                     fixed_w = 4 + 10 + 2
-                    remain_w = max(20, cols - fixed_w)
+                    remain_w = max(12, safe_width - fixed_w)
 
                     title_w = int(remain_w * 0.42)
                     author_w = int(remain_w * 0.23)
@@ -222,7 +224,7 @@ class SearchView:
                     state_pad = pad_to_width(f" {in_shelf}", 10, align="right")
 
                     line_content = f"{idx_str}{title_pad} {author_pad} {src_pad}{state_pad}"
-                    final_line = pad_to_width(truncate_to_width(line_content, cols), cols)
+                    final_line = pad_to_width(truncate_to_width(line_content, safe_width), safe_width)
 
                     if is_selected:
                         buffer.append(f"\033[K{BG_BLUE}{FG_WHITE}{BOLD}{final_line}{RESET}\n")
@@ -232,35 +234,37 @@ class SearchView:
                     buffer.append("\033[K\n")
 
         # 4. 底部详情预览框
-        buffer.append(f"\033[K{FG_GRAY}{'─' * cols}{RESET}\n")
+        buffer.append(f"\033[K{FG_GRAY}{'─' * safe_width}{RESET}\n")
         if self.results and 0 <= self.cursor_pos < len(self.results):
             cur = self.results[self.cursor_pos]
             latest_line = f"书源: {cur.source_name}  最新: {cur.latest_chapter or '未知'}  更新: {cur.last_update_time or '未知'}"
             abs_text = (cur.intro or "").replace("\n", " ").strip() or "选中后按 Enter 自动下载并分章阅读。"
-            buffer.append(f"\033[K  {FG_CYAN}来源:{RESET} {truncate_to_width(latest_line, cols - 8)}\n")
-            buffer.append(f"\033[K  {FG_GRAY}简介:{RESET} {truncate_to_width(abs_text, cols - 8)}\n")
+            buffer.append(f"\033[K  {FG_CYAN}来源:{RESET} {truncate_to_width(latest_line, max(1, safe_width - 8))}\n")
+            buffer.append(f"\033[K  {FG_GRAY}简介:{RESET} {truncate_to_width(abs_text, max(1, safe_width - 8))}\n")
         else:
             buffer.append("\033[K\n\033[K\n")
 
         # 5. 底部状态与操作指引
         if self.toast_msg and time.time() < self.toast_time:
-            footer = f" {FG_GREEN}✔ {self.toast_msg}{RESET}"
-            buffer.append(f"{INVERSE}{pad_to_width(footer, cols)}{RESET}")
+            footer = f" ✔ {self.toast_msg}"
+            buffer.append(f"\033[K{INVERSE}{pad_to_width(truncate_to_width(footer, safe_width), safe_width)}{RESET}\033[J")
         else:
             if self.focus == "input":
-                b_left = " [Enter]开始搜索  [↓/Tab]切换到结果列表  [Esc]返回书架"
-                b_right = " 模式: 编辑搜索词 "
+                b_left = " [Enter]搜索  [↓/Tab]选书  [Esc]返回"
+                b_right = " 编辑中 "
             else:
-                b_left = " [Enter]下载并阅读  [a]加入书架  [↑/↓]选择书籍  [Tab]编辑搜索词"
-                b_right = " 模式: 选择结果 "
+                b_left = " [Enter]下载阅读  [a]加书架  [↑/↓]选书  [Tab]编辑"
+                b_right = " 选结果 "
 
-            b_gap = max(1, cols - str_visual_width(b_left) - str_visual_width(b_right))
+            if str_visual_width(b_left) + str_visual_width(b_right) + 1 > safe_width:
+                b_right = ""
+            b_gap = max(0, safe_width - str_visual_width(b_left) - str_visual_width(b_right))
             footer = b_left + (" " * b_gap) + b_right
-            buffer.append(f"{INVERSE}{truncate_to_width(footer, cols)}{RESET}")
+            buffer.append(f"\033[K{INVERSE}{pad_to_width(truncate_to_width(footer, safe_width), safe_width)}{RESET}\033[J")
 
         self.term.write("".join(buffer))
         if self.focus == "input":
-            cursor_col = min(cols, 1 + p_w + str_visual_width(self.query))
+            cursor_col = min(safe_width, 1 + p_w + str_visual_width(q_text))
             self.term.move_cursor(cursor_col, 2)
             self.term.show_cursor()
         else:
@@ -277,7 +281,7 @@ class SearchView:
                     continue
 
                 _, rows = self.term.get_size()
-                list_height = max(1, rows - 10)
+                list_height = max(1, rows - 7)
 
                 if key == KEY_ESC:
                     return None

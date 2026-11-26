@@ -55,28 +55,28 @@ class TOCView:
 
     def render(self) -> None:
         cols, rows = self.term.get_size()
+        cols, rows = max(1, cols), max(1, rows)
+        safe_width = max(1, cols - 1)
         list_height = max(1, rows - 4)
 
-        buffer = []
-        buffer.append("\033[H")
+        buffer = ["\033[H"]
 
         # 1. 顶部标题栏
         top_title = " 📑 章节目录导航"
         top_meta = f"共 {len(self.chapters)} 章 (当前: 第 {self.current_index + 1} 章) "
-        t_gap = max(1, cols - str_visual_width(top_title) - str_visual_width(top_meta))
+        t_gap = max(1, safe_width - str_visual_width(top_title) - str_visual_width(top_meta))
         header = top_title + (" " * t_gap) + top_meta
-        if str_visual_width(header) > cols:
-            header = header[:cols]
-        buffer.append(f"{INVERSE}{BOLD}{header}{RESET}\n")
+        buffer.append(f"\033[K{INVERSE}{BOLD}{pad_to_width(truncate_to_width(header, safe_width), safe_width)}{RESET}\n")
 
         # 2. 搜索框
         search_prompt = " 🔍 过滤/跳转: "
-        disp_filter = self.filter_text + "█"
         match_info = f"匹配 {len(self.filtered_indices)} 章 "
-        s_gap = max(1, cols - str_visual_width(search_prompt) - str_visual_width(self.filter_text) - 1 - str_visual_width(match_info))
+        avail_f = max(4, safe_width - str_visual_width(search_prompt) - str_visual_width(match_info) - 2)
+        disp_filter = truncate_to_width(self.filter_text, avail_f) + "█"
+        s_gap = max(1, safe_width - str_visual_width(search_prompt) - str_visual_width(disp_filter) - str_visual_width(match_info))
         search_line = search_prompt + f"{FG_YELLOW}{BOLD}{disp_filter}{RESET}" + (" " * s_gap) + f"{FG_GRAY}{match_info}{RESET}"
         buffer.append(f"\033[K{search_line}\n")
-        buffer.append(f"\033[K{FG_GRAY}{'─' * cols}{RESET}\n")
+        buffer.append(f"\033[K{FG_GRAY}{'─' * safe_width}{RESET}\n")
 
         # 3. 目录列表项
         visible_indices = self.filtered_indices[self.top_offset : self.top_offset + list_height]
@@ -93,12 +93,7 @@ class TOCView:
                 title_str = ch.title
 
                 line_content = f"{prefix}{num_str}{vol_str}{title_str}"
-                # 填充整行宽度
-                l_width = str_visual_width(line_content)
-                pad_space = " " * max(0, cols - l_width)
-                full_line = line_content + pad_space
-                full_line = truncate_to_width(full_line, cols)
-                full_line = pad_to_width(full_line, cols)
+                full_line = pad_to_width(truncate_to_width(line_content, safe_width), safe_width)
 
                 if is_selected:
                     buffer.append(f"\033[K{BG_BLUE}{FG_WHITE}{BOLD}{full_line}{RESET}\n")
@@ -110,13 +105,13 @@ class TOCView:
                 buffer.append("\033[K\n")
 
         # 4. 底部操作指引
-        b_left = " [↑/↓]选择  [Enter]跳转阅读  [输入文字/数字]快速过滤"
+        b_left = " [↑/↓]选择  [Enter]跳转  [文字/数字]过滤"
         b_right = " [Esc]清空/返回 "
-        b_gap = max(1, cols - str_visual_width(b_left) - str_visual_width(b_right))
+        if str_visual_width(b_left) + str_visual_width(b_right) + 1 > safe_width:
+            b_right = ""
+        b_gap = max(0, safe_width - str_visual_width(b_left) - str_visual_width(b_right))
         footer = b_left + (" " * b_gap) + b_right
-        if str_visual_width(footer) > cols:
-            footer = footer[:cols]
-        buffer.append(f"{INVERSE}{footer}{RESET}")
+        buffer.append(f"\033[K{INVERSE}{pad_to_width(truncate_to_width(footer, safe_width), safe_width)}{RESET}\033[J")
 
         self.term.write("".join(buffer))
         self.term.flush()
