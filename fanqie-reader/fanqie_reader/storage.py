@@ -1,11 +1,12 @@
 from __future__ import annotations
 import json
-import os
+import shutil
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 from .models import Book, Chapter, ShelfItem
+
 
 class StorageManager:
     """本地存储管理器：书架、阅读进度、章节离线缓存"""
@@ -15,7 +16,7 @@ class StorageManager:
             self.base_dir = Path(base_dir)
         else:
             self.base_dir = Path.home() / ".fanqie_reader"
-        
+
         self.shelf_file = self.base_dir / "bookshelf.json"
         self.cache_dir = self.base_dir / "cache"
         self.chapters_dir = self.base_dir / "chapters"
@@ -33,12 +34,11 @@ class StorageManager:
         """加载书架，按最新活跃时间倒序排列（新的排在最前面）"""
         if not self.shelf_file.exists():
             return []
-        
+
         try:
             with open(self.shelf_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 items = [ShelfItem.from_dict(item) for item in data]
-                # Preserve the upstream shelf ordering and keep locally added books recent.
                 items.sort(key=lambda x: (x.added_at or x.book.updated_at), reverse=True)
                 return items
         except Exception:
@@ -78,11 +78,11 @@ class StorageManager:
                     it.added_at = book.updated_at
                 found = it
                 break
-        
+
         if not found:
             found = ShelfItem(book=book, last_read_time=0.0, added_at=added_at or book.updated_at)
             items.insert(0, found)
-        
+
         self.save_shelf(items)
         return found
 
@@ -158,7 +158,7 @@ class StorageManager:
                     it.book = book
                 found = True
                 break
-        
+
         if not found and book:
             new_item = ShelfItem(
                 book=book,
@@ -169,7 +169,7 @@ class StorageManager:
                 last_read_time=time.time()
             )
             items.insert(0, new_item)
-        
+
         self.save_shelf(items)
 
     # ------------------ 目录元数据缓存 ------------------
@@ -195,7 +195,33 @@ class StorageManager:
         except Exception:
             return None
 
-    # ------------------ 章节正文离线缓存 ------------------
+    # ------------------ 章节正文离线缓存 & 下载状态 ------------------
+
+    def get_downloaded_chapter_count(self, book_id: str) -> int:
+        """返回本地已下载的章节数量"""
+        book_cache = self.cache_dir / book_id
+        if not book_cache.exists():
+            return 0
+        try:
+            return sum(1 for p in book_cache.iterdir() if p.suffix == ".txt")
+        except Exception:
+            return 0
+
+    def is_book_downloaded(self, book_id: str) -> bool:
+        """判断书籍是否已在本地完成下载并分章"""
+        chapters = self.get_chapters_meta(book_id)
+        if not chapters:
+            return False
+        return self.get_downloaded_chapter_count(book_id) > 0
+
+    def clear_book_cache(self, book_id: str) -> None:
+        """清空指定书籍的本地章节正文与目录缓存（换源重下时使用）"""
+        book_cache = self.cache_dir / book_id
+        if book_cache.exists():
+            shutil.rmtree(book_cache, ignore_errors=True)
+        meta_file = self.chapters_dir / f"{book_id}.json"
+        if meta_file.exists():
+            meta_file.unlink(missing_ok=True)
 
     def get_chapter_cache(self, book_id: str, item_id: str) -> Optional[Tuple[str, str]]:
         """读取已缓存的章节正文"""

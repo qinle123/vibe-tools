@@ -3,7 +3,6 @@ import unittest
 import re
 from unittest.mock import MagicMock, patch
 
-from fanqie_reader.api import FanqieAPI
 from fanqie_reader.models import Book, Chapter
 from fanqie_reader.storage import StorageManager
 from fanqie_reader.ui.reader_view import ReaderView
@@ -34,10 +33,9 @@ class TestReaderView(unittest.TestCase):
     def test_loading_screen_does_not_reset_saved_reading_offset(self):
         with tempfile.TemporaryDirectory() as directory:
             terminal = MockTerminal()
-            api = MagicMock()
-            api.get_chapter_content.return_value = ("第一章", "阅读正文。" * 1000)
             storage = StorageManager(directory)
-            reader = ReaderView(terminal, api, storage, Book("101", "测试书"),
+            storage.save_chapter_cache("101", "c1", "第一章", "阅读正文。" * 1000)
+            reader = ReaderView(terminal, storage, Book("101", "测试书"),
                                 [Chapter("c1", "第一章")], initial_line_offset=30)
             reader._prefetch_next_chapter = MagicMock()
             reader.load_current_chapter()
@@ -49,7 +47,7 @@ class TestReaderView(unittest.TestCase):
                 with self.subTest(cols=cols):
                     terminal = MockTerminal(size=(cols, 12))
                     reader = ReaderView(
-                        terminal, MagicMock(), StorageManager(directory),
+                        terminal, StorageManager(directory),
                         Book("101", "很长的中文书名" * 10),
                         [Chapter("c1", "很长的章节标题" * 10)],
                     )
@@ -64,7 +62,7 @@ class TestReaderView(unittest.TestCase):
     def test_render_does_not_scroll_screen_or_repaint_when_idle(self):
         with tempfile.TemporaryDirectory() as directory:
             terminal = MockTerminal()
-            reader = ReaderView(terminal, MagicMock(), StorageManager(directory),
+            reader = ReaderView(terminal, StorageManager(directory),
                                 Book("101", "测试书"), [Chapter("c1", "第一章")])
             reader.formatted_lines = [f"正文行{i}" for i in range(30)]
             reader.render()
@@ -76,9 +74,9 @@ class TestReaderView(unittest.TestCase):
     def test_one_line_scroll_preserves_layout_and_overlapping_screen_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             terminal = MockTerminal(size=(65, 12))
-            api = MagicMock()
-            api.get_chapter_content.return_value = ("第一章", "".join(f"第{i}段阅读正文。\n" for i in range(80)))
-            reader = ReaderView(terminal, api, StorageManager(directory),
+            storage = StorageManager(directory)
+            storage.save_chapter_cache("101", "c1", "第一章", "".join(f"第{i}段阅读正文。\n" for i in range(80)))
+            reader = ReaderView(terminal, storage,
                                 Book("101", "测试书"), [Chapter("c1", "第一章")])
             reader._prefetch_next_chapter = MagicMock()
             reader.load_current_chapter(reset_offset=True)
@@ -90,7 +88,6 @@ class TestReaderView(unittest.TestCase):
                     reader.render()
                 layout.assert_not_called()
             self.assertEqual(reader.formatted_lines, original)
-            # 记录绝对定位的屏幕行，模拟覆盖写入，检查一行对应一个正文行。
             screen = {}
             for frame in terminal.output:
                 parts = re.split(r"\x1b\[(\d+);1H", frame)
@@ -103,9 +100,9 @@ class TestReaderView(unittest.TestCase):
     def test_resize_reflows_in_memory_and_preserves_reading_anchor(self):
         with tempfile.TemporaryDirectory() as directory:
             terminal = MockTerminal(size=(100, 12))
-            api = MagicMock()
-            api.get_chapter_content.return_value = ("第一章", "\n".join(f"段{i:03d}：" + "阅读正文。" * 30 for i in range(30)))
-            reader = ReaderView(terminal, api, StorageManager(directory),
+            storage = StorageManager(directory)
+            storage.save_chapter_cache("101", "c1", "第一章", "\n".join(f"段{i:03d}：" + "阅读正文。" * 30 for i in range(30)))
+            reader = ReaderView(terminal, storage,
                                 Book("101", "测试书"), [Chapter("c1", "第一章")])
             reader._prefetch_next_chapter = MagicMock()
             reader.load_current_chapter(reset_offset=True)
@@ -117,24 +114,22 @@ class TestReaderView(unittest.TestCase):
             self.assertLessEqual(consumed, anchor)
             self.assertLess(anchor - consumed, reader.layout_engine.content_width)
             self.assertLessEqual(max(map(str_visual_width, reader.formatted_lines)), 38)
-            api.get_chapter_content.assert_called_once()
 
     def test_switching_width_uses_loaded_content_without_refetch(self):
         with tempfile.TemporaryDirectory() as directory:
             terminal = MockTerminal(keys=["w", "q"], size=(120, 12))
-            api = MagicMock()
-            api.get_chapter_content.return_value = ("第一章", "阅读正文。" * 1000)
-            reader = ReaderView(terminal, api, StorageManager(directory),
+            storage = StorageManager(directory)
+            storage.save_chapter_cache("101", "c1", "第一章", "阅读正文。" * 1000)
+            reader = ReaderView(terminal, storage,
                                 Book("101", "测试书"), [Chapter("c1", "第一章")])
             reader._prefetch_next_chapter = MagicMock()
             reader.run()
             self.assertEqual(reader.layout_engine.content_width, 100)
-            api.get_chapter_content.assert_called_once()
 
     def test_small_help_and_long_toast_do_not_overflow_or_leave_help_residue(self):
         with tempfile.TemporaryDirectory() as directory:
             terminal = MockTerminal(keys=[KEY_DOWN, KEY_UP, "x"], size=(24, 6))
-            reader = ReaderView(terminal, MagicMock(), StorageManager(directory),
+            reader = ReaderView(terminal, StorageManager(directory),
                                 Book("101", "测试书"), [Chapter("c1", "第一章")])
             reader.formatted_lines = [f"正文行{i}" for i in range(12)]
             reader.render()
@@ -155,14 +150,11 @@ class TestReaderView(unittest.TestCase):
             storage = StorageManager(directory)
             book = Book("101", "测试书")
             storage.add_to_shelf(book)
-            api = FanqieAPI()
-            api.get_chapter_content = MagicMock(side_effect=[
-                ("第一章", "第一章正文。" * 40),
-                ("第二章", "第二章正文。" * 40),
-            ])
+            storage.save_chapter_cache("101", "c1", "第一章", "第一章正文。" * 40)
+            storage.save_chapter_cache("101", "c2", "第二章", "第二章正文。" * 40)
             terminal = MockTerminal(keys=[KEY_UP, "j", "k", KEY_DOWN, "l", "h", "q"])
             reader = ReaderView(
-                terminal, api, storage, book,
+                terminal, storage, book,
                 [Chapter("c1", "第一章"), Chapter("c2", "第二章")],
             )
             reader._prefetch_next_chapter = MagicMock()
@@ -171,46 +163,43 @@ class TestReaderView(unittest.TestCase):
 
             self.assertEqual(reader.chapter_index, 0)
             self.assertEqual(reader.line_offset, 0)
-            self.assertEqual(
-                [call.args[0] for call in api.get_chapter_content.call_args_list],
-                ["c1", "c2", "c1"],
-            )
 
-    def test_short_legacy_cache_is_revalidated_instead_of_shown_as_a_complete_chapter(self):
+    def test_missing_local_cache_shows_download_hint(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = StorageManager(directory)
             book = Book("101", "测试书")
             storage.add_to_shelf(book)
-            storage.save_chapter_cache("101", "c1", "第一章", "只有少量试读内容。")
-            api = FanqieAPI()
-            api.get_chapter_content = MagicMock(
-                side_effect=RuntimeError("章节正文只返回试读片段（136/2071 字）")
-            )
             reader = ReaderView(
-                MockTerminal(), api, storage, book, [Chapter("c1", "第一章")]
+                MockTerminal(), storage, book, [Chapter("c1", "第一章")]
             )
 
             reader.load_current_chapter(reset_offset=True)
 
-            api.get_chapter_content.assert_called_once_with("c1", cookie_header=None)
-            self.assertTrue(any("正文未完整加载" in line for line in reader.formatted_lines))
-            self.assertFalse(any("本章完" in line for line in reader.formatted_lines))
-            self.assertEqual(storage.get_shelf_item("101").last_chapter_id, "")
+            self.assertTrue(any("暂不可用" in line for line in reader.formatted_lines))
+            self.assertTrue(any("c" in line for line in reader.formatted_lines))
 
-    def test_o_opens_current_chapter_on_official_site(self):
+    def test_c_switches_source_and_reloads_chapter(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = StorageManager(directory)
-            book = Book("101", "测试书")
+            book = Book("101", "测试书", source_name="旧源")
             storage.add_to_shelf(book)
-            api = FanqieAPI()
-            api.get_chapter_content = MagicMock(return_value=("第一章", "正文"))
-            terminal = MockTerminal(keys=["o", "q"])
-            reader = ReaderView(terminal, api, storage, book, [Chapter("c1", "第一章")])
+            storage.save_chapter_cache("101", "c1", "第一章", "旧源正文。" * 10)
+            new_book = Book("101", "测试书", source_name="新源")
+            new_chapters = [Chapter("c1", "第一章(新)")]
 
-            with unittest.mock.patch("fanqie_reader.ui.reader_view.webbrowser.open", return_value=True) as open_browser:
-                reader.run()
+            def switch_cb(_book):
+                storage.save_chapter_cache("101", "c1", "第一章(新)", "新源正文内容。")
+                return new_book, new_chapters
 
-            open_browser.assert_called_once_with("https://fanqienovel.com/reader/c1")
+            terminal = MockTerminal(keys=["c", "q"])
+            reader = ReaderView(
+                terminal, storage, book, [Chapter("c1", "第一章")],
+                on_switch_source=switch_cb,
+            )
+            reader.run()
+
+            self.assertEqual(reader.book.source_name, "新源")
+            self.assertTrue(any("新源正文内容" in line for line in reader.formatted_lines))
 
     def test_d_and_u_scroll_half_view_and_flash_new_reading_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -218,7 +207,7 @@ class TestReaderView(unittest.TestCase):
             book = Book("101", "测试书")
             storage.add_to_shelf(book)
             reader = ReaderView(
-                MockTerminal(), FanqieAPI(), storage, book,
+                MockTerminal(), storage, book,
                 [Chapter("c1", "第一章")],
             )
             reader.formatted_lines = [f"line{i}" for i in range(1, 31)]
@@ -232,76 +221,6 @@ class TestReaderView(unittest.TestCase):
 
             reader.scroll_half_page(-1)
             self.assertEqual(reader.line_offset, 0)
-
-    def test_reading_progress_is_written_to_cloud(self):
-        with tempfile.TemporaryDirectory() as directory:
-            storage = StorageManager(directory)
-            book = Book("101", "测试书")
-            storage.add_to_shelf(book)
-            api = FanqieAPI()
-            api.update_cloud_progress = MagicMock()
-            reader = ReaderView(
-                MockTerminal(), api, storage, book,
-                [Chapter("c1", "第一章"), Chapter("c2", "第二章", index=1)],
-                initial_chapter_index=1,
-            )
-            reader.auth.is_logged_in = MagicMock(return_value=True)
-            reader.auth.get_cookie_header = MagicMock(return_value="session=test")
-
-            reader.save_current_progress()
-            reader.flush_cloud_progress()
-
-            payload = api.update_cloud_progress.call_args.args[0]
-            self.assertEqual(payload["book_id"], "101")
-            self.assertEqual(payload["item_id"], "c2")
-            self.assertEqual(payload["index"], 1)
-
-    def test_cloud_progress_uses_book_fraction_and_flushes_on_exit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            storage = StorageManager(directory)
-            book = Book("101", "测试书", chapter_total=4)
-            storage.add_to_shelf(book)
-            api = FanqieAPI()
-            api.get_chapter_content = MagicMock(return_value=("第一章", "正文。" * 300))
-            api.update_cloud_progress = MagicMock()
-            reader = ReaderView(
-                MockTerminal(keys=["j", "q"]), api, storage, book,
-                [Chapter("c1", "第一章"), Chapter("c2", "第二章"), Chapter("c3", "第三章"), Chapter("c4", "第四章")],
-            )
-            reader.auth.is_logged_in = MagicMock(return_value=True)
-            reader.auth.get_cookie_header = MagicMock(return_value="session=test")
-            reader._prefetch_next_chapter = MagicMock()
-
-            reader.run()
-
-            payload = api.update_cloud_progress.call_args.args[0]
-            self.assertEqual(payload["item_id"], "c1")
-            self.assertEqual(payload["index"], 0)
-            self.assertGreater(payload["read_progress"], 0)
-            self.assertLessEqual(payload["read_progress"], 2500)
-            self.assertEqual(api.update_cloud_progress.call_count, 1)
-
-    def test_cloud_progress_flushes_when_reader_loop_raises(self):
-        with tempfile.TemporaryDirectory() as directory:
-            storage = StorageManager(directory)
-            book = Book("101", "测试书")
-            storage.add_to_shelf(book)
-            api = FanqieAPI()
-            terminal = MockTerminal()
-            terminal.read_key = MagicMock(side_effect=RuntimeError("terminal failed"))
-            api.update_cloud_progress = MagicMock()
-            reader = ReaderView(terminal, api, storage, book, [Chapter("c1", "第一章")])
-            reader.auth.is_logged_in = MagicMock(return_value=True)
-            reader.auth.get_cookie_header = MagicMock(return_value="session=test")
-            reader.load_current_chapter = MagicMock()
-            reader.save_current_progress = MagicMock()
-            reader.flush_cloud_progress = MagicMock()
-
-            with self.assertRaisesRegex(RuntimeError, "terminal failed"):
-                reader.run()
-
-            reader.save_current_progress.assert_called()
-            reader.flush_cloud_progress.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,15 @@
 from __future__ import annotations
+import hashlib
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
+
+
+def make_local_book_id(title: str, author: str = "") -> str:
+    """Generate a stable book_id for books searched/downloaded from external sources."""
+    key = f"{title.strip()}|{author.strip()}".encode("utf-8")
+    return "local_" + hashlib.md5(key).hexdigest()[:12]
+
 
 @dataclass
 class Chapter:
@@ -9,6 +17,7 @@ class Chapter:
     title: str
     volume_name: str = ""
     index: int = 0
+    source_url: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -19,8 +28,10 @@ class Chapter:
             item_id=str(data.get("item_id", "")),
             title=str(data.get("title", "")),
             volume_name=str(data.get("volume_name", "")),
-            index=int(data.get("index", 0))
+            index=int(data.get("index", 0)),
+            source_url=str(data.get("source_url", "")),
         )
+
 
 @dataclass
 class Book:
@@ -33,6 +44,8 @@ class Book:
     chapter_total: int = 0
     updated_at: float = field(default_factory=time.time)
     media_genre: int = 0
+    source_name: str = ""
+    source_url: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -48,8 +61,26 @@ class Book:
             thumb_url=str(data.get("thumb_url", "")),
             chapter_total=int(data.get("chapter_total", 0)),
             media_genre=int(data.get("media_genre", 0) or 0),
-            updated_at=float(data.get("updated_at", time.time()))
+            updated_at=float(data.get("updated_at", time.time())),
+            source_name=str(data.get("source_name", "")),
+            source_url=str(data.get("source_url", "")),
         )
+
+
+@dataclass
+class SourceBook:
+    """A book search hit from an external download source (so-novel rule)."""
+    source_name: str
+    source_base_url: str
+    book_url: str
+    title: str
+    author: str = ""
+    category: str = ""
+    latest_chapter: str = ""
+    last_update_time: str = ""
+    intro: str = ""
+    match_score: int = 0
+
 
 @dataclass
 class ShelfItem:

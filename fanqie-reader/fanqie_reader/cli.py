@@ -7,11 +7,13 @@ from typing import Optional
 from .api import FanqieAPI
 from .storage import StorageManager
 from .auth import AuthManager
+from .sources import SourceManager
 from .ui.terminal import TerminalApp
 from .ui.shelf_view import ShelfView
 from .ui.search_view import SearchView
 from .ui.reader_view import ReaderView
 from .ui.login_view import LoginView
+from .ui.download_view import DownloadView
 
 __version__ = "0.1.1"
 
@@ -123,6 +125,7 @@ def main() -> None:
     api = FanqieAPI()
     storage = StorageManager()
     auth = AuthManager()
+    source_manager = SourceManager()
 
     # 处理纯命令行工具操作（无需占用全屏终端模式）
     if args.command == "login":
@@ -167,47 +170,30 @@ def main() -> None:
                 shelf_view.run()
 
         elif args.command == "search":
-            search_view = SearchView(term, api, storage, initial_query=args.keyword)
+            search_view = SearchView(term, source_manager, storage, initial_query=args.keyword)
             chosen_book = search_view.run()
             if chosen_book:
                 shelf_item = storage.get_shelf_item(chosen_book.book_id)
                 if shelf_item:
-                    shelf_view = ShelfView(term, api, storage, auth)
+                    shelf_view = ShelfView(term, api, storage, auth, source_manager=source_manager)
                     shelf_view._open_book_reader(shelf_item)
             else:
-                # 返回书架
-                shelf_view = ShelfView(term, api, storage, auth)
+                shelf_view = ShelfView(term, api, storage, auth, source_manager=source_manager)
                 shelf_view.run()
 
         elif args.command == "read":
             book_id = args.book_id
             shelf_item = storage.get_shelf_item(book_id)
             if not shelf_item:
-                # 获取书籍详情并加入书架
-                book, chapters = api.get_book_detail(book_id)
+                book = api.get_book_info(book_id)
                 shelf_item = storage.add_to_shelf(book)
-                storage.save_chapters_meta(book_id, chapters)
-            else:
-                chapters = storage.get_chapters_meta(book_id)
-                if not chapters:
-                    book, chapters = api.get_book_detail(book_id)
-                    shelf_item.book = book
-                    storage.save_chapters_meta(book_id, chapters)
 
-            reader = ReaderView(
-                term=term,
-                api=api,
-                storage=storage,
-                book=shelf_item.book,
-                chapters=chapters,
-                initial_chapter_index=shelf_item.last_chapter_index,
-                initial_line_offset=shelf_item.line_offset
-            )
-            reader.run()
+            shelf_view = ShelfView(term, api, storage, auth, source_manager=source_manager)
+            shelf_view._open_book_reader(shelf_item)
 
         else:
             # 默认打开主书架界面
-            shelf_view = ShelfView(term, api, storage, auth)
+            shelf_view = ShelfView(term, api, storage, auth, source_manager=source_manager)
             shelf_view.run()
 
     except KeyboardInterrupt:

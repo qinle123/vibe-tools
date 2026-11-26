@@ -8,6 +8,7 @@ from ..models import ShelfItem, Book, Chapter
 from ..storage import StorageManager
 from ..api import FanqieAPI
 from ..auth import AuthManager
+from ..sources import SourceManager, SourceBook
 from ..text_engine import str_visual_width, truncate_to_width, pad_to_width
 from .terminal import (
     TerminalApp,
@@ -21,6 +22,7 @@ from .reader_view import ReaderView
 from .search_view import SearchView
 from .toc_view import TOCView
 from .login_view import LoginView
+from .download_view import DownloadView
 
 # This shelf entry is the audiobook feed for the text edition already in the cloud shelf.
 TEXT_EDITION_OVERRIDES = {
@@ -46,11 +48,19 @@ def format_relative_time(timestamp: float) -> str:
 class ShelfView:
     """本地个人书架控制台视图"""
 
-    def __init__(self, term: TerminalApp, api: FanqieAPI, storage: StorageManager, auth: Optional[AuthManager] = None):
+    def __init__(
+        self,
+        term: TerminalApp,
+        api: FanqieAPI,
+        storage: StorageManager,
+        auth: Optional[AuthManager] = None,
+        source_manager: Optional[SourceManager] = None,
+    ):
         self.term = term
         self.api = api
         self.storage = storage
         self.auth = auth or AuthManager()
+        self.source_manager = source_manager or SourceManager()
 
         self.shelf_items: List[ShelfItem] = []
         self.cursor_pos: int = 0
@@ -167,8 +177,11 @@ class ShelfView:
                     cur_ch_str = item.last_chapter_title or f"第 {item.last_chapter_index + 1} 章"
                     pct_str = f"{item.progress_percent():.1f}%"
                     total_str = f"共{item.book.chapter_total}章" if item.book.chapter_total else ""
-                    
-                    progress_info = f"[{cur_ch_str} | {pct_str} {total_str}]"
+                    dl_tag = f"已下载·{item.book.source_name}" if self.storage.is_book_downloaded(item.book.book_id) and item.book.source_name else (
+                        "已下载" if self.storage.is_book_downloaded(item.book.book_id) else "未下载"
+                    )
+
+                    progress_info = f"[{dl_tag} | {cur_ch_str} {pct_str} {total_str}]"
                     time_info = format_relative_time(item.last_read_time) + " "
 
                     left_col = idx_str + title_str + author_str
@@ -204,7 +217,7 @@ class ShelfView:
                 b_left = " [Enter]阅读选中书籍  [↑/↓]挑选匹配项  [ESC]退出过滤模式"
                 b_right = " 模式: 书架快速过滤 "
             else:
-                b_left = " [Enter]阅读  [/]过滤书架  [s]搜书  [S]同步手机  [L]登录  [t]目录  [d]移除  [r]刷新"
+                b_left = " [Enter]阅读  [/]过滤  [s]搜书下载  [c]换源  [S]同步手机  [L]登录  [t]目录  [d]移除"
                 b_right = " [q]退出 "
             b_gap = max(1, cols - str_visual_width(b_left) - str_visual_width(b_right))
             footer = b_left + (" " * b_gap) + b_right
@@ -301,67 +314,47 @@ class ShelfView:
             self.show_toast(f"同步失败: {e}", duration=4.0)
             self.render()
 
+    def _switch_book_source(self, book: Book, is_switch_source: bool = True) -> Optional[Tuple[Book, List[Chapter]]]:
+        """引导用户搜索并下载/换源书籍"""
+        dl_view = DownloadView(
+            self.term,
+            self.source_manager,
+            self.storage,
+            book=book,
+            is_switch_source=is_switch_source,
+        )
+        res = dl_view.run()
+        self.reload_shelf()
+        return res
+
     def _open_book_reader(self, item: ShelfItem) -> None:
-        """加载书籍并打开阅读器进行断点续读"""
+        """加载本地书籍并打开阅读器；若本地尚未下载则先引导搜索下载"""
         text_book_id = TEXT_EDITION_OVERRIDES.get(item.book.book_id)
         if text_book_id:
             text_item = self.storage.get_shelf_item(text_book_id)
             if text_item:
                 item = text_item
 
-        self.term.clear()
-        cols, rows = self.term.get_size()
-        msg = f"正在加载《{item.book.title}》目录及章节数据..."
-        pad_x = max(0, (cols - str_visual_width(msg)) // 2)
-        pad_y = max(1, rows // 2)
-        self.term.move_cursor(pad_x + 1, pad_y + 1)
-        self.term.write(f"{FG_YELLOW}{BOLD}{msg}{RESET}")
-        self.term.flush()
-
-        # 优先读取缓存的目录元数据
-        chapters = self.storage.get_chapters_meta(item.book.book_id)
-        if not chapters:
-            try:
-                book, chapters = self.api.get_book_detail(item.book.book_id)
-                item.book = book
-                self.storage.save_chapters_meta(book.book_id, chapters)
-            except Exception as e:
-                self.show_toast(f"获取书籍信息失败: {e}")
+        # 本地尚未下载时，第一次进去引导搜索同名同作者源并下载分章
+        if not self.storage.is_book_downloaded(item.book.book_id):
+            downloaded = self._switch_book_source(item.book, is_switch_source=False)
+            if not downloaded:
+                self.show_toast("已取消下载")
                 return
-
-        if self.auth.is_logged_in():
-            try:
-                cloud_progress = self.api.get_cloud_progress(self.auth.get_cookie_header())
-                progress = next((
-                    row for row in cloud_progress
-                    if str(row.get("book_id", "")) == item.book.book_id and row.get("item_id")
-                ), None)
-                if progress:
-                    chapter_id = str(progress["item_id"])
-                    chapter_index = next((
-                        idx for idx, chapter in enumerate(chapters)
-                        if chapter.item_id == chapter_id
-                    ), int(progress.get("index", 0) or 0))
-                    chapter_title = chapters[chapter_index].title if 0 <= chapter_index < len(chapters) else ""
-                    self.storage.update_cloud_progress(
-                        item.book.book_id,
-                        chapter_index,
-                        chapter_id,
-                        chapter_title,
-                        float(progress.get("read_timestamp", 0) or 0),
-                    )
-                    item = self.storage.get_shelf_item(item.book.book_id) or item
-            except Exception:
-                pass
+            _, chapters = downloaded
+            item = self.storage.get_shelf_item(item.book.book_id) or item
+        else:
+            chapters = self.storage.get_chapters_meta(item.book.book_id) or []
 
         reader = ReaderView(
             term=self.term,
-            api=self.api,
             storage=self.storage,
             book=item.book,
             chapters=chapters,
             initial_chapter_index=item.last_chapter_index,
-            initial_line_offset=item.line_offset
+            initial_line_offset=item.line_offset,
+            source_manager=self.source_manager,
+            on_switch_source=lambda b: self._switch_book_source(b, is_switch_source=True),
         )
         reader.run()
         self.reload_shelf()
@@ -493,15 +486,24 @@ class ShelfView:
                             chosen = display_items[self.cursor_pos]
                             self._open_book_reader(chosen)
 
-                    # 按 s：在线搜索
+                    # 按 s：全网书源搜索下载
                     elif key == 's':
-                        search = SearchView(self.term, self.api, self.storage)
+                        search = SearchView(self.term, self.source_manager, self.storage)
                         new_book = search.run()
                         self.reload_shelf()
                         if new_book:
                             shelf_item = self.storage.get_shelf_item(new_book.book_id)
                             if shelf_item:
                                 self._open_book_reader(shelf_item)
+
+                    # 按 c：换源 / 重新下载选中书籍
+                    elif key == 'c':
+                        if display_items and 0 <= self.cursor_pos < len(display_items):
+                            item = display_items[self.cursor_pos]
+                            res = self._switch_book_source(item.book, is_switch_source=True)
+                            if res:
+                                self.show_toast(f"《{item.book.title}》已更新书源: {res[0].source_name}")
+                            self.reload_shelf()
 
                     # 按 L：官方账号扫码/Cookie登录
                     elif key in ('l', 'L'):
@@ -525,15 +527,12 @@ class ShelfView:
                         if display_items and 0 <= self.cursor_pos < len(display_items):
                             item = display_items[self.cursor_pos]
                             chapters = self.storage.get_chapters_meta(item.book.book_id)
-                            if not chapters:
-                                try:
-                                    book, chapters = self.api.get_book_detail(item.book.book_id)
-                                    item.book = book
-                                    self.storage.save_chapters_meta(book.book_id, chapters)
-                                except Exception as e:
-                                    self.show_toast(f"获取目录失败: {e}")
+                            if not chapters or not self.storage.is_book_downloaded(item.book.book_id):
+                                res = self._switch_book_source(item.book, is_switch_source=False)
+                                if not res:
                                     continue
-                            
+                                item.book, chapters = res
+
                             toc = TOCView(self.term, chapters, item.last_chapter_index)
                             chosen_idx = toc.run()
                             if chosen_idx is not None:
@@ -541,20 +540,30 @@ class ShelfView:
                                 item.line_offset = 0
                                 self._open_book_reader(item)
 
-                    # 按 r：联网刷新选中书籍信息
+                    # 按 r：从当前书源重新下载/更新章节
                     elif key == 'r':
                         if display_items and 0 <= self.cursor_pos < len(display_items):
                             item = display_items[self.cursor_pos]
-                            self.show_toast(f"正在刷新《{item.book.title}》最新章节...")
-                            self.render()
-                            try:
-                                book, chapters = self.api.get_book_detail(item.book.book_id)
-                                item.book = book
-                                self.storage.save_chapters_meta(book.book_id, chapters)
-                                self.storage.add_to_shelf(book)
-                                self.show_toast(f"刷新成功，当前全书共 {len(chapters)} 章")
-                            except Exception as e:
-                                self.show_toast(f"刷新失败: {e}")
-                            self.reload_shelf()
+                            if item.book.source_name and item.book.source_url:
+                                self.show_toast(f"正在从 [{item.book.source_name}] 更新《{item.book.title}》...")
+                                self.render()
+                                try:
+                                    sb = SourceBook(
+                                        source_name=item.book.source_name,
+                                        source_base_url="",
+                                        book_url=item.book.source_url,
+                                        title=item.book.title,
+                                        author=item.book.author,
+                                    )
+                                    chapters = self.source_manager.download_book(sb, self.storage, item.book)
+                                    self.show_toast(f"更新成功，当前全书共 {len(chapters)} 章")
+                                except Exception as e:
+                                    self.show_toast(f"更新失败: {e}")
+                                self.reload_shelf()
+                            else:
+                                res = self._switch_book_source(item.book, is_switch_source=False)
+                                if res:
+                                    self.show_toast(f"《{item.book.title}》下载完成")
+                                self.reload_shelf()
         finally:
             self.term.hide_cursor()

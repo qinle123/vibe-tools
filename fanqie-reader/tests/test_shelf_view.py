@@ -91,26 +91,47 @@ class TestShelfView(unittest.TestCase):
         open_reader.assert_called_once()
         self.assertEqual(open_reader.call_args.args[0].book.book_id, visible.book.book_id)
 
-    def test_open_prefers_cloud_chapter_id_even_when_local_timestamp_is_newer(self):
+    def test_open_undownloaded_book_triggers_download_guide(self):
+        book = Book("101", "诡舍", author="夜来风雨声", chapter_total=2)
+        item = self.storage.add_to_shelf(book)
+        term = MagicMock()
+        term.get_size.return_value = (80, 24)
+        shelf = ShelfView(term, self.mock_api, self.storage, self.mock_auth)
+
+        with patch("fanqie_reader.ui.shelf_view.DownloadView") as dl_view, patch(
+            "fanqie_reader.ui.shelf_view.ReaderView"
+        ) as reader_view:
+            dl_view.return_value.run.return_value = (
+                book,
+                [Chapter("ch_0", "第一章", index=0), Chapter("ch_1", "第二章", index=1)],
+            )
+            shelf._open_book_reader(item)
+
+        dl_view.assert_called_once()
+        reader_view.assert_called_once()
+
+    def test_open_downloaded_book_opens_reader_directly(self):
         book = Book("101", "诡舍", chapter_total=2)
         item = self.storage.add_to_shelf(book)
         self.storage.save_chapters_meta("101", [
             Chapter("c1", "第一章", index=0),
             Chapter("c2", "第二章", index=1),
         ])
-        self.storage.update_progress("101", 0, "c1", "第一章", 0, book)
-        self.mock_auth.is_logged_in.return_value = True
-        self.mock_api.get_cloud_progress.return_value = [{
-            "book_id": "101", "item_id": "c2", "index": "0", "read_timestamp": "100",
-        }]
+        self.storage.save_chapter_cache("101", "c1", "第一章", "本地正文")
+        self.storage.update_progress("101", 1, "c2", "第二章", 12, book)
+        item = self.storage.get_shelf_item("101")
         term = MagicMock()
         term.get_size.return_value = (80, 24)
         shelf = ShelfView(term, self.mock_api, self.storage, self.mock_auth)
 
-        with patch("fanqie_reader.ui.shelf_view.ReaderView") as reader_view:
+        with patch("fanqie_reader.ui.shelf_view.DownloadView") as dl_view, patch(
+            "fanqie_reader.ui.shelf_view.ReaderView"
+        ) as reader_view:
             shelf._open_book_reader(item)
 
+        dl_view.assert_not_called()
         self.assertEqual(reader_view.call_args.kwargs["initial_chapter_index"], 1)
+        self.assertEqual(reader_view.call_args.kwargs["initial_line_offset"], 12)
 
     def test_filter_mode_with_physical_arrows(self):
         # 测试在书架按 '/' 进行过滤，并用物理上下键挑选书籍

@@ -8,7 +8,6 @@ import time
 from typing import List, Tuple, Optional, Dict, Any
 
 from .models import Book, Chapter
-from .decrypt import decode_chapter
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -242,38 +241,6 @@ class FanqieAPI:
 
         return book, chapters
 
-    def get_chapter_content(
-        self,
-        item_id: str,
-        book_id: Optional[str] = None,
-        cookie_header: Optional[str] = None,
-    ) -> Tuple[str, str]:
-        """获取指定章节内容并解密为纯文本"""
-        url = f"https://fanqienovel.com/reader/{item_id}"
-        headers = {"Referer": "https://fanqienovel.com/"}
-        if cookie_header:
-            headers["Cookie"] = cookie_header
-        page_html = self._fetch(url, headers=headers)
-        state = self._parse_initial_state(page_html)
-        
-        reader = state.get("reader", {})
-        chapter_data = reader.get("chapterData", {})
-        title = chapter_data.get("title", "")
-        raw_content = chapter_data.get("content", "")
-        
-        # 解密与排版
-        cleaned_text = decode_chapter(raw_content)
-        try:
-            expected_words = int(chapter_data.get("chapterWordNumber", 0) or 0)
-        except (TypeError, ValueError):
-            expected_words = 0
-        if expected_words >= 500 and len(cleaned_text) < expected_words * 0.5:
-            raise RuntimeError(
-                f"章节正文只返回试读片段（{len(cleaned_text)}/{expected_words} 字），"
-                "未缓存不完整内容；按 o 在番茄官方网页打开本章。"
-            )
-        return title, cleaned_text
-
     # ------------------ 官方云端书架与阅读进度同步 ------------------
 
     def get_cloud_bookshelf(self, cookie_header: str) -> List[Dict[str, Any]]:
@@ -302,27 +269,4 @@ class FanqieAPI:
             return []
         except Exception as e:
             raise RuntimeError(f"获取云端阅读进度失败: {e}")
-
-    def update_cloud_progress(self, progress: Dict[str, Any], cookie_header: str) -> None:
-        """Write the current text-reading position to the official account."""
-        url = "https://fanqienovel.com/api/reader/book/update_progress"
-        body = json.dumps(progress).encode("utf-8")
-        headers = {
-            "Cookie": cookie_header,
-            "Referer": "https://fanqienovel.com/",
-            "Content-Type": "application/json;charset=UTF-8",
-            "Origin": "https://fanqienovel.com",
-            "Accept": "application/json, text/plain, */*",
-            "User-Agent": DEFAULT_HEADERS["User-Agent"],
-        }
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                result = json.loads(resp.read().decode("utf-8", errors="ignore"))
-            # 网页接口有时返回数字 0，有时返回字符串 "0"。
-            code = result.get("code", 0)
-            if str(code) not in {"0", "200"}:
-                raise RuntimeError(result.get("message", "云端进度更新失败"))
-        except Exception as e:
-            raise RuntimeError(f"更新云端阅读进度失败: {e}")
 

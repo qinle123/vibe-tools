@@ -1,13 +1,11 @@
 from __future__ import annotations
 import time
 import threading
-import webbrowser
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from ..models import Book, Chapter
 from ..storage import StorageManager
-from ..api import FanqieAPI
-from ..auth import AuthManager
+from ..sources import SourceManager
 from ..text_engine import (
     TextLayoutEngine, str_visual_width, truncate_to_width, sanitize_terminal_text,
 )
@@ -29,21 +27,18 @@ class ReaderView:
     def __init__(
         self,
         term: TerminalApp,
-        api: FanqieAPI,
         storage: StorageManager,
         book: Book,
         chapters: List[Chapter],
         initial_chapter_index: int = 0,
-        initial_line_offset: int = 0
+        initial_line_offset: int = 0,
+        source_manager: Optional[SourceManager] = None,
+        on_switch_source: Optional[Callable[[Book], Optional[Tuple[Book, List[Chapter]]]]] = None,
     ):
         self.term = term
-        self.api = api
         self.storage = storage
-        self.auth = AuthManager(storage.base_dir)
-        self._cloud_sync_timer: Optional[threading.Timer] = None
-        self._cloud_sync_payload = None
-        self._cloud_sync_lock = threading.Lock()
-        self._cloud_sync_error: Optional[str] = None
+        self.source_manager = source_manager
+        self.on_switch_source = on_switch_source
         self.book = book
         self.chapters = chapters
         progress_item = storage.get_shelf_item(book.book_id)
@@ -106,23 +101,26 @@ class ReaderView:
         self.highlight_line = None
 
     def _fetch_chapter_content(self, ch_idx: int) -> Tuple[str, str]:
-        """获取章节内容（优先从本地离线缓存读，没有则联网获取并缓存）"""
+        """获取章节内容（优先从本地离线缓存读，缺失时尝试从绑定书源补拉）"""
         if not (0 <= ch_idx < len(self.chapters)):
             return "", ""
-        
+
         target_ch = self.chapters[ch_idx]
         cached = self.storage.get_chapter_cache(self.book.book_id, target_ch.item_id)
-        # Older versions cached preview-only responses as if they were complete.
-        if cached and len(cached[1]) >= 250:
+        if cached and cached[1].strip():
             return cached
 
-        # 联网请求
-        cookie_header = self.auth.get_cookie_header() if self.auth.is_logged_in() else None
-        title, content = self.api.get_chapter_content(target_ch.item_id, cookie_header=cookie_header)
-        if not title:
-            title = target_ch.title
-        self.storage.save_chapter_cache(self.book.book_id, target_ch.item_id, title, content)
-        return title, content
+        if self.source_manager and self.book.source_name and target_ch.source_url:
+            rule = self.source_manager.get_rule_by_name(self.book.source_name)
+            if rule:
+                title, content = self.source_manager.fetch_chapter_content(rule, target_ch.source_url)
+                if not title:
+                    title = target_ch.title
+                if content.strip():
+                    self.storage.save_chapter_cache(self.book.book_id, target_ch.item_id, title, content)
+                    return title, content
+
+        raise RuntimeError("本章尚未下载到本地，请按 [c] 换源或重新下载本书。")
 
     def _prefetch_next_chapter(self) -> None:
         """后台异步预加载下一章"""
@@ -157,9 +155,9 @@ class ReaderView:
             self.current_title = self.chapters[self.chapter_index].title
             error_lines = [
                 "",
-                "章节正文未完整加载",
+                "章节正文暂不可用",
                 str(e),
-                "按 'o' 在番茄官方网页打开本章，或按 'r' 重试。",
+                "按 'c' 切换书源并下载，或按 'r' 重试拉取本章。",
                 "也可按 '[' / ']' 切换章节，按 'q' 返回书架。",
                 ""
             ]
@@ -183,10 +181,10 @@ class ReaderView:
             self.save_current_progress()
 
     def save_current_progress(self) -> None:
-        """保存断点续读记录"""
+        """保存本地断点续读记录"""
         if not self.chapters or not (0 <= self.chapter_index < len(self.chapters)):
             return
-        
+
         cur_ch = self.chapters[self.chapter_index]
         self.storage.update_progress(
             book_id=self.book.book_id,
@@ -196,46 +194,6 @@ class ReaderView:
             line_offset=self.line_offset,
             book=self.book
         )
-        if self.auth.is_logged_in():
-            total_lines = max(1, len(self.formatted_lines))
-            chapter_fraction = min(1.0, max(0.0, self.line_offset / total_lines))
-            book_fraction = (
-                self.chapter_index + chapter_fraction
-            ) / max(1, len(self.chapters))
-            self._cloud_sync_payload = {
-                "book_id": self.book.book_id,
-                "item_id": cur_ch.item_id,
-                "read_progress": round(book_fraction * 10000),
-                "index": self.chapter_index,
-                "read_timestamp": str(int(time.time())),
-                "genre_type": 0,
-            }
-            # 服务端的 read_progress 是整本书的万分比；index 才是章节序号。
-            self._cloud_sync_error = None
-            if self._cloud_sync_timer:
-                self._cloud_sync_timer.cancel()
-            self._cloud_sync_timer = threading.Timer(0.35, self._sync_cloud_progress)
-            self._cloud_sync_timer.daemon = True
-            self._cloud_sync_timer.start()
-
-    def _sync_cloud_progress(self) -> None:
-        with self._cloud_sync_lock:
-            payload = self._cloud_sync_payload
-            if not payload or not self.auth.is_logged_in():
-                return
-            try:
-                self.api.update_cloud_progress(payload, self.auth.get_cookie_header())
-                self._cloud_sync_payload = None
-                self._cloud_sync_error = None
-            except Exception as exc:
-                # 保留 payload，退出时的 flush 可以再次尝试；不要让失败静默消失。
-                self._cloud_sync_error = str(exc)
-
-    def flush_cloud_progress(self) -> None:
-        if self._cloud_sync_timer:
-            self._cloud_sync_timer.cancel()
-            self._cloud_sync_timer = None
-        self._sync_cloud_progress()
 
     def scroll_half_page(self, direction: int) -> None:
         _, rows = self.term.get_size()
@@ -339,7 +297,8 @@ class ReaderView:
             "t：查看并搜索目录",
             "w：切换列宽 (65/80/100)，按窗口自动适配",
             "a：加入 / 移出本地书架",
-            "r：重新加载本章；o：官方网页打开本章",
+            "c：切换下载书源（换源重下）",
+            "r：重新拉取本章正文",
             "q / Esc：退出阅读并保存断点",
         ]
         offset = 0
@@ -482,15 +441,20 @@ class ReaderView:
                         cache_file.unlink(missing_ok=True)
                     self.load_current_chapter(reset_offset=False)
 
-                # 在官方网页阅读当前章节
-                elif key == 'o':
-                    if 0 <= self.chapter_index < len(self.chapters):
-                        item_id = self.chapters[self.chapter_index].item_id
-                        try:
-                            opened = webbrowser.open(f"https://fanqienovel.com/reader/{item_id}")
-                            self.show_toast("已在浏览器打开番茄官方章节页" if opened else "无法启动浏览器，请手动打开番茄章节页")
-                        except Exception as exc:
-                            self.show_toast(f"打开官方网页失败: {exc}")
+                # 切换书源（换源）
+                elif key == 'c':
+                    if self.on_switch_source:
+                        switched = self.on_switch_source(self.book)
+                        self._last_frame = None
+                        if switched:
+                            new_book, new_chapters = switched
+                            self.book = new_book
+                            self.chapters = new_chapters
+                            self.chapter_index = min(self.chapter_index, max(0, len(new_chapters) - 1))
+                            self.load_current_chapter(reset_offset=False)
+                            self.show_toast(f"已切换书源: {new_book.source_name}")
+                    else:
+                        self.show_toast("当前模式不支持换源")
 
                 # 打开目录
                 elif key == 't':
@@ -506,6 +470,5 @@ class ReaderView:
                 elif key in ('?', '/'):
                     self.show_help_modal()
         finally:
-            # q/Esc、Ctrl-C、异常退出都先落本地并同步最后一次云端进度。
+            # q/Esc、Ctrl-C、异常退出都先保存本地断点进度。
             self.save_current_progress()
-            self.flush_cloud_progress()

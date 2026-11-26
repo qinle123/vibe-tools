@@ -1,63 +1,74 @@
 import unittest
 import tempfile
 import shutil
-from pathlib import Path
+from unittest.mock import patch
 
-from fanqie_reader.api import FanqieAPI
+from fanqie_reader.sources import SourceManager
 from fanqie_reader.storage import StorageManager
 from fanqie_reader.text_engine import TextLayoutEngine
-from fanqie_reader.models import Book, Chapter
+from fanqie_reader.models import Book, Chapter, SourceBook, make_local_book_id
+
 
 class TestCLIWorkflow(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
         self.storage = StorageManager(base_dir=self.test_dir)
-        self.api = FanqieAPI()
+        self.source_manager = SourceManager()
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    def test_full_user_flow(self):
-        # 1. 模拟搜索
-        results = self.api.search_books("诡秘", count=3)
-        self.assertGreater(len(results), 0)
-        book = results[0]
+    def test_full_local_download_and_resume_flow(self):
+        sb = SourceBook(
+            source_name="香书小说",
+            source_base_url="http://www.ibiqugu.net/",
+            book_url="http://www.ibiqugu.net/1/123/",
+            title="诡秘测试",
+            author="测试作者",
+        )
+        book = Book(
+            book_id=make_local_book_id(sb.title, sb.author),
+            title=sb.title,
+            author=sb.author,
+        )
+        chapters = [
+            Chapter("ch_00000", "第一章 开端", index=0, source_url="http://www.ibiqugu.net/1/123/1.html"),
+            Chapter("ch_00001", "第二章 继续", index=1, source_url="http://www.ibiqugu.net/1/123/2.html"),
+        ]
 
-        # 2. 加入书架
-        shelf_item = self.storage.add_to_shelf(book)
+        with patch.object(self.source_manager, "fetch_toc", return_value=chapters), patch.object(
+            self.source_manager,
+            "fetch_chapter_content",
+            side_effect=[
+                ("第一章 开端", "这是第一章的正文内容，用于验证下载后一次性分章落盘。" * 20),
+                ("第二章 继续", "这是第二章的正文内容。" * 20),
+            ],
+        ):
+            downloaded = self.source_manager.download_book(sb, self.storage, book)
+
+        self.assertEqual(len(downloaded), 2)
+        self.assertTrue(self.storage.is_book_downloaded(book.book_id))
         self.assertTrue(self.storage.is_in_shelf(book.book_id))
 
-        # 3. 获取书籍详情与目录
-        detail_book, chapters = self.api.get_book_detail(book.book_id)
-        self.assertGreater(len(chapters), 0)
-        self.storage.save_chapters_meta(book.book_id, chapters)
-
-        # 4. 模拟阅读第 1 章并更新断点
-        first_ch = chapters[0]
-        title, content = self.api.get_chapter_content(first_ch.item_id)
-        self.storage.save_chapter_cache(book.book_id, first_ch.item_id, title, content)
-
-        # 排版
+        title, content = self.storage.get_chapter_cache(book.book_id, "ch_00000")
         engine = TextLayoutEngine(content_width=80)
         lines = engine.layout_chapter(title, content)
-        self.assertGreater(len(lines), 5)
+        self.assertGreater(len(lines), 3)
 
-        # 断点续读到第 15 行
         self.storage.update_progress(
             book_id=book.book_id,
             chapter_index=0,
-            chapter_id=first_ch.item_id,
+            chapter_id="ch_00000",
             chapter_title=title,
-            line_offset=15,
-            book=detail_book
+            line_offset=5,
+            book=book,
         )
-
-        # 5. 重新打开书架，验证断点完美保存
         reloaded = self.storage.get_shelf_item(book.book_id)
         self.assertIsNotNone(reloaded)
         self.assertEqual(reloaded.last_chapter_index, 0)
-        self.assertEqual(reloaded.last_chapter_id, first_ch.item_id)
-        self.assertEqual(reloaded.line_offset, 15)
+        self.assertEqual(reloaded.last_chapter_id, "ch_00000")
+        self.assertEqual(reloaded.line_offset, 5)
+
 
 if __name__ == "__main__":
     unittest.main()
