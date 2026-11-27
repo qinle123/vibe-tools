@@ -57,7 +57,11 @@ def headless_sync(api: FanqieAPI, storage: StorageManager, auth: AuthManager) ->
                     completed_count += 1
                     try:
                         book = future.result()
-                        storage.add_to_shelf(book, added_at=cloud_times.get(book.book_id))
+                        storage.add_to_shelf(
+                            book,
+                            added_at=cloud_times.get(book.book_id),
+                            in_cloud_shelf=True,
+                        )
                         new_books += 1
                     except Exception:
                         pass

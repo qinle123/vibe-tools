@@ -21,6 +21,9 @@ class StorageManager:
         self.cache_dir = self.base_dir / "cache"
         self.chapters_dir = self.base_dir / "chapters"
 
+        self._shelf_ids_cache: Optional[Tuple[Tuple[int, int], frozenset[str]]] = None
+        self._chapters_nonempty_cache: Dict[str, Tuple[Tuple[int, int], bool]] = {}
+
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -31,7 +34,7 @@ class StorageManager:
     # ------------------ 书架与阅读进度 ------------------
 
     def load_shelf(self) -> List[ShelfItem]:
-        """加载书架，按最新活跃时间倒序排列（新的排在最前面）"""
+        """加载书架，按最近打开时间优先倒序排列（最近阅读的排在最前面）"""
         if not self.shelf_file.exists():
             return []
 
@@ -39,18 +42,30 @@ class StorageManager:
             with open(self.shelf_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 items = [ShelfItem.from_dict(item) for item in data]
-                items.sort(key=lambda x: (x.added_at or x.book.updated_at), reverse=True)
+                items.sort(
+                    key=lambda x: (x.last_read_time or 0.0, x.added_at or x.book.updated_at),
+                    reverse=True,
+                )
                 return items
         except Exception:
             return []
 
     def save_shelf(self, items: List[ShelfItem]) -> None:
         """保存书架"""
+        self._shelf_ids_cache = None
         temp_file = self.shelf_file.with_suffix(".tmp")
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump([item.to_dict() for item in items], f, ensure_ascii=False, indent=2)
             temp_file.replace(self.shelf_file)
+            try:
+                st = self.shelf_file.stat()
+                self._shelf_ids_cache = (
+                    (st.st_mtime_ns, st.st_size),
+                    frozenset(it.book.book_id for it in items),
+                )
+            except OSError:
+                pass
         except Exception:
             if temp_file.exists():
                 temp_file.unlink(missing_ok=True)
@@ -63,9 +78,26 @@ class StorageManager:
         return None
 
     def is_in_shelf(self, book_id: str) -> bool:
-        return self.get_shelf_item(book_id) is not None
+        try:
+            st = self.shelf_file.stat()
+        except OSError:
+            self._shelf_ids_cache = None
+            return False
 
-    def add_to_shelf(self, book: Book, added_at: Optional[float] = None) -> ShelfItem:
+        sig = (st.st_mtime_ns, st.st_size)
+        if self._shelf_ids_cache is not None and self._shelf_ids_cache[0] == sig:
+            return book_id in self._shelf_ids_cache[1]
+
+        ids = frozenset(it.book.book_id for it in self.load_shelf())
+        self._shelf_ids_cache = (sig, ids)
+        return book_id in ids
+
+    def add_to_shelf(
+        self,
+        book: Book,
+        added_at: Optional[float] = None,
+        in_cloud_shelf: Optional[bool] = None,
+    ) -> ShelfItem:
         """添加书籍到书架，已存在则更新书籍元数据"""
         items = self.load_shelf()
         found: Optional[ShelfItem] = None
@@ -76,11 +108,18 @@ class StorageManager:
                     it.added_at = added_at
                 elif not it.added_at:
                     it.added_at = book.updated_at
+                if in_cloud_shelf is not None:
+                    it.in_cloud_shelf = in_cloud_shelf
                 found = it
                 break
 
         if not found:
-            found = ShelfItem(book=book, last_read_time=0.0, added_at=added_at or book.updated_at)
+            found = ShelfItem(
+                book=book,
+                last_read_time=0.0,
+                added_at=added_at or book.updated_at,
+                in_cloud_shelf=in_cloud_shelf,
+            )
             items.insert(0, found)
 
         self.save_shelf(items)
@@ -120,7 +159,11 @@ class StorageManager:
         items = self.load_shelf()
         changed = False
         for item in items:
-            if item.book.book_id in cloud_times:
+            in_cloud = item.book.book_id in cloud_times
+            if item.in_cloud_shelf is not in_cloud:
+                item.in_cloud_shelf = in_cloud
+                changed = True
+            if in_cloud and item.added_at != cloud_times[item.book.book_id]:
                 item.added_at = cloud_times[item.book.book_id]
                 changed = True
         if changed:
@@ -176,10 +219,16 @@ class StorageManager:
 
     def save_chapters_meta(self, book_id: str, chapters: List[Chapter]) -> None:
         """缓存整本书的章节目录"""
+        self._chapters_nonempty_cache.pop(book_id, None)
         file_path = self.chapters_dir / f"{book_id}.json"
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump([ch.to_dict() for ch in chapters], f, ensure_ascii=False)
+            try:
+                st = file_path.stat()
+                self._chapters_nonempty_cache[book_id] = ((st.st_mtime_ns, st.st_size), bool(chapters))
+            except OSError:
+                pass
         except Exception:
             pass
 
@@ -207,15 +256,41 @@ class StorageManager:
         except Exception:
             return 0
 
+    def _has_chapters_meta(self, book_id: str) -> bool:
+        """检查书籍是否有非空目录缓存，结果按文件 stat 缓存在内存中"""
+        file_path = self.chapters_dir / f"{book_id}.json"
+        try:
+            st = file_path.stat()
+        except OSError:
+            self._chapters_nonempty_cache.pop(book_id, None)
+            return False
+
+        sig = (st.st_mtime_ns, st.st_size)
+        cached = self._chapters_nonempty_cache.get(book_id)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+
+        chapters = self.get_chapters_meta(book_id)
+        has_chapters = bool(chapters)
+        self._chapters_nonempty_cache[book_id] = (sig, has_chapters)
+        return has_chapters
+
     def is_book_downloaded(self, book_id: str) -> bool:
         """判断书籍是否已在本地完成下载并分章"""
-        chapters = self.get_chapters_meta(book_id)
-        if not chapters:
+        book_cache = self.cache_dir / book_id
+        if not book_cache.exists():
             return False
-        return self.get_downloaded_chapter_count(book_id) > 0
+        try:
+            has_txt = any(p.suffix == ".txt" for p in book_cache.iterdir())
+        except Exception:
+            return False
+        if not has_txt:
+            return False
+        return self._has_chapters_meta(book_id)
 
     def clear_book_cache(self, book_id: str) -> None:
         """清空指定书籍的本地章节正文与目录缓存（换源重下时使用）"""
+        self._chapters_nonempty_cache.pop(book_id, None)
         book_cache = self.cache_dir / book_id
         if book_cache.exists():
             shutil.rmtree(book_cache, ignore_errors=True)

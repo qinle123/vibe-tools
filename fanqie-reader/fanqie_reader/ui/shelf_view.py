@@ -72,11 +72,15 @@ class ShelfView:
         self.toast_msg: str = ""
         self.toast_time: float = 0.0
         self.confirm_delete_id: Optional[str] = None
+        self._shelf_version: int = 0
+        self._last_render_state = None
 
         self.reload_shelf()
 
     def reload_shelf(self) -> None:
         self.shelf_items = self.storage.load_shelf()
+        self._shelf_version += 1
+        self._last_render_state = None
         display_items = self._get_display_items()
         self.cursor_pos = min(self.cursor_pos, max(0, len(display_items) - 1))
 
@@ -115,6 +119,31 @@ class ShelfView:
         # 计算可用高度: 顶部栏(1) + 过滤栏(0或2) + 列表 + 底部栏(1) = rows
         header_lines = 3 if self.filter_mode else 1
         list_height = max(1, rows - 1 - header_lines)
+
+        now = time.time()
+        active_toast = self.toast_msg if (self.toast_msg and now < self.toast_time) else ""
+        visible_items = display_items[self.top_offset : self.top_offset + list_height]
+        dl_sig = tuple(
+            (t.status, t.done, t.total)
+            for item in visible_items
+            if (t := self.source_manager.get_download_task(item.book.book_id)) is not None
+        )
+        render_state = (
+            cols,
+            rows,
+            self._shelf_version,
+            self.cursor_pos,
+            self.top_offset,
+            self.filter_mode,
+            self.filter_query,
+            self.confirm_delete_id,
+            active_toast,
+            dl_sig,
+            int(now // 60),
+            self.auth.is_logged_in(),
+        )
+        if self._last_render_state == render_state:
+            return
 
         buffer = ["\033[H"]
 
@@ -172,6 +201,8 @@ class ShelfView:
                     is_selected = (real_idx == self.cursor_pos)
 
                     idx_str = f" {real_idx + 1:2d}. "
+                    is_cloud = item.is_cloud_book()
+                    origin_label = "[番茄]" if is_cloud else "[本地]"
                     title_str = f"《{item.book.title}》"
                     author_str = f" {item.book.author}" if item.book.author else ""
 
@@ -181,17 +212,19 @@ class ShelfView:
                     dl_task = self.source_manager.get_download_task(item.book.book_id)
                     if dl_task and dl_task.is_active:
                         dl_tag = "解析目录中" if dl_task.status == "fetching_toc" else f"下载中 {dl_task.percent}%"
-                    elif self.storage.is_book_downloaded(item.book.book_id) and item.book.source_name:
-                        dl_tag = f"已下载·{item.book.source_name}"
-                    elif self.storage.is_book_downloaded(item.book.book_id):
-                        dl_tag = "已下载"
                     else:
-                        dl_tag = "未下载"
+                        is_downloaded = self.storage.is_book_downloaded(item.book.book_id)
+                        if is_downloaded and item.book.source_name:
+                            dl_tag = f"已下载·{item.book.source_name}"
+                        elif is_downloaded:
+                            dl_tag = "已下载"
+                        else:
+                            dl_tag = "未下载"
 
                     progress_info = f"[{dl_tag} | {cur_ch_str} {pct_str} {total_str}]"
                     time_info = format_relative_time(item.last_read_time) + " "
 
-                    left_col = idx_str + title_str + author_str
+                    left_col = f"{idx_str}{origin_label} {title_str}{author_str}"
                     right_col = f"{progress_info}  {time_info}"
 
                     l_w = str_visual_width(left_col)
@@ -203,18 +236,24 @@ class ShelfView:
                     if is_selected:
                         buffer.append(f"\033[K{BG_BLUE}{FG_WHITE}{BOLD}{full_line}{RESET}\n")
                     else:
+                        if origin_label in full_line:
+                            tag_color = FG_CYAN if is_cloud else FG_YELLOW
+                            full_line = full_line.replace(origin_label, f"{tag_color}{origin_label}{RESET}", 1)
                         buffer.append(f"\033[K{full_line}\n")
                 else:
                     buffer.append("\033[K\n")
 
         # 4. 底部状态与操作指引
         if self.confirm_delete_id:
-            del_item = self.storage.get_shelf_item(self.confirm_delete_id)
+            del_item = next(
+                (it for it in self.shelf_items if it.book.book_id == self.confirm_delete_id),
+                None,
+            ) or self.storage.get_shelf_item(self.confirm_delete_id)
             book_name = del_item.book.title if del_item else ""
             warn_text = truncate_to_width(f" ⚠ 确认将《{book_name}》从书架移除？(按 y 确认，其他键取消)", safe_width)
             buffer.append(f"\033[K{BG_DARK_GRAY}{FG_YELLOW}{BOLD}{pad_to_width(warn_text, safe_width)}{RESET}\033[J")
-        elif self.toast_msg and time.time() < self.toast_time:
-            t_text = truncate_to_width(f" ✔ {self.toast_msg}", safe_width)
+        elif active_toast:
+            t_text = truncate_to_width(f" ✔ {active_toast}", safe_width)
             buffer.append(f"\033[K{INVERSE}{FG_GREEN}{pad_to_width(t_text, safe_width)}{RESET}\033[J")
         else:
             if self.filter_mode:
@@ -238,6 +277,7 @@ class ShelfView:
         else:
             self.term.hide_cursor()
         self.term.flush()
+        self._last_render_state = render_state
 
     def sync_mobile(self) -> None:
         """从手机端/云端同步官方书架和最新阅读位置（多线程并发极速拉取）"""
@@ -279,7 +319,11 @@ class ShelfView:
                         completed_count += 1
                         try:
                             book = future.result()
-                            self.storage.add_to_shelf(book, added_at=cloud_times.get(book.book_id))
+                            self.storage.add_to_shelf(
+                                book,
+                                added_at=cloud_times.get(book.book_id),
+                                in_cloud_shelf=True,
+                            )
                             new_books += 1
                         except Exception:
                             pass
@@ -371,14 +415,24 @@ class ShelfView:
             on_switch_source=lambda b: self._switch_book_source(b, is_switch_source=True),
         )
         reader.run()
+        self.cursor_pos = 0
+        self.top_offset = 0
         self.reload_shelf()
+
+    def _idle_timeout(self) -> float:
+        timeout = 2.0
+        if any(t.is_active for t in getattr(self.source_manager, "_downloads", {}).values()):
+            timeout = 0.5
+        if self.toast_msg and time.time() < self.toast_time:
+            timeout = min(timeout, max(0.05, self.toast_time - time.time()))
+        return timeout
 
     def run(self) -> None:
         """书架主循环"""
         try:
             while True:
                 self.render()
-                key = self.term.read_key(0.5, text_input=self.filter_mode)
+                key = self.term.read_key(self._idle_timeout(), text_input=self.filter_mode)
                 if not key:
                     continue
 

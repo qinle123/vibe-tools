@@ -1,13 +1,18 @@
 from __future__ import annotations
 import re
+from functools import lru_cache
 from typing import List, Tuple
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 try:
     import wcwidth
+    @lru_cache(maxsize=8192)
     def char_width(c: str) -> int:
         w = wcwidth.wcwidth(c)
         return max(0, w if w >= 0 else 1)
 except ImportError:
+    @lru_cache(maxsize=8192)
     def char_width(c: str) -> int:
         # 降级方案：CJK 区域字符宽度为 2，其他为 1
         cp = ord(c)
@@ -29,7 +34,11 @@ def str_visual_width(s: str) -> int:
 
 def sanitize_terminal_text(text: str) -> str:
     """一行只包含可显示文本，控制字符不能移动终端光标。"""
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", text.expandtabs(4))
+    if text.isprintable():
+        return text
+    if "\t" in text:
+        text = text.expandtabs(4)
+    return _CONTROL_CHAR_RE.sub("", text)
 
 def truncate_to_width(s: str, max_width: int, ellipsis: str = "") -> str:
     """根据真实终端列宽截断字符串，确保总宽度严格 <= max_width，绝不造成终端换行错位"""

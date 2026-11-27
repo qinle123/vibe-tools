@@ -58,11 +58,14 @@ class ReaderView:
         self._layout_is_error = False
         self._last_frame = None
         self._last_frame_size = None
+        self._last_render_state = None
         self.loading: bool = False
         self.toast_message: str = ""
         self.toast_time: float = 0.0
         self.highlight_line: Optional[int] = None
         self.highlight_until: float = 0.0
+        self._progress_dirty: bool = False
+        self._last_save_time: float = 0.0
 
         # 后台预加载线程
         self.prefetch_thread: Optional[threading.Thread] = None
@@ -182,6 +185,8 @@ class ReaderView:
 
     def save_current_progress(self) -> None:
         """保存本地断点续读记录"""
+        self._progress_dirty = False
+        self._last_save_time = time.monotonic()
         if not self.chapters or not (0 <= self.chapter_index < len(self.chapters)):
             return
 
@@ -194,6 +199,18 @@ class ReaderView:
             line_offset=self.line_offset,
             book=self.book
         )
+
+    def _mark_progress_dirty(self) -> None:
+        """滚动时节流保存进度，避免连续翻行频繁重写 bookshelf.json。"""
+        now = time.monotonic()
+        if now - self._last_save_time >= 1.0:
+            self.save_current_progress()
+        else:
+            self._progress_dirty = True
+
+    def _flush_progress_if_dirty(self) -> None:
+        if self._progress_dirty:
+            self.save_current_progress()
 
     def scroll_half_page(self, direction: int) -> None:
         _, rows = self.term.get_size()
@@ -210,7 +227,7 @@ class ReaderView:
         if self.line_offset != previous_offset:
             self.highlight_line = target_line
             self.highlight_until = time.monotonic() + 1.2
-            self.save_current_progress()
+            self._mark_progress_dirty()
 
     @staticmethod
     def _compose_bar(left: str, right: str, width: int) -> str:
@@ -230,6 +247,34 @@ class ReaderView:
         if not self.loading:
             self._update_layout(cols)
             self.line_offset = min(self.line_offset, max(0, len(self.formatted_lines) - max(1, content_rows)))
+        if self.highlight_line is not None and time.monotonic() >= self.highlight_until:
+            self.highlight_line = None
+
+        now_wall = time.time()
+        active_toast = self.toast_message if (self.toast_message and now_wall < self.toast_time) else ""
+        in_shelf = self.storage.is_in_shelf(self.book.book_id)
+        clock_str = time.strftime('%H:%M')
+        render_state = (
+            cols,
+            rows,
+            self.loading,
+            self.line_offset,
+            self.chapter_index,
+            self.width_idx,
+            in_shelf,
+            active_toast,
+            self.highlight_line,
+            clock_str,
+            self.book.book_id,
+            self.book.source_name,
+            self.current_title,
+            len(self.formatted_lines),
+            id(self.formatted_lines),
+            id(self._layout_source),
+        )
+        if self._last_frame is not None and self._last_render_state == render_state:
+            return
+
         cur_title = self.current_title or (self.chapters[self.chapter_index].title if self.chapters else "")
         vol_info = f"[{self.chapters[self.chapter_index].volume_name}] " if self.chapters and self.chapters[self.chapter_index].volume_name else ""
         top_bar = self._compose_bar(
@@ -237,8 +282,6 @@ class ReaderView:
             f"宽:{self.layout_engine.content_width}列 ", safe_width,
         )
         frame = [(top_bar, INVERSE + BOLD)]
-        if self.highlight_line is not None and time.monotonic() >= self.highlight_until:
-            self.highlight_line = None
         for index in range(content_rows):
             line_index = self.line_offset + index
             text, style = "", ""
@@ -254,17 +297,17 @@ class ReaderView:
             frame.append((truncate_to_width(sanitize_terminal_text(text), safe_width), style))
 
         if rows > 1:
-            if self.toast_message and time.time() < self.toast_time:
-                bottom_bar = truncate_to_width(sanitize_terminal_text(f" ✔ {self.toast_message}"), safe_width)
+            if active_toast:
+                bottom_bar = truncate_to_width(sanitize_terminal_text(f" ✔ {active_toast}"), safe_width)
                 bottom_style = INVERSE + FG_GREEN
             else:
                 total_lines = len(self.formatted_lines)
                 end = min(total_lines, self.line_offset + content_rows)
                 percent = int(end / max(1, total_lines) * 100)
                 chapter = f"{self.chapter_index + 1}/{len(self.chapters)}"
-                shelf = "★已在书架" if self.storage.is_in_shelf(self.book.book_id) else "☆未加书架"
+                shelf = "★已在书架" if in_shelf else "☆未加书架"
                 left = f" 章节:{chapter} 行:{end}/{total_lines} {percent}% | {shelf}"
-                right = f"[t]目录 [w]排版 [a]书架 [?]帮助 [Esc]返回 {time.strftime('%H:%M')} "
+                right = f"[t]目录 [w]排版 [a]书架 [?]帮助 [Esc]返回 {clock_str} "
                 if str_visual_width(left + right) + 1 > safe_width:
                     right = "[?]帮助 [Esc]返回 "
                 if safe_width < 48:
@@ -284,6 +327,7 @@ class ReaderView:
             self.term.flush()
         self._last_frame = frame
         self._last_frame_size = (cols, rows)
+        self._last_render_state = render_state
 
     def show_help_modal(self) -> None:
         """显示按键帮助浮层"""
@@ -332,6 +376,16 @@ class ReaderView:
         self._last_frame = None
         self.render()
 
+    def _idle_timeout(self) -> float:
+        timeout = 2.0
+        if self.toast_message and time.time() < self.toast_time:
+            timeout = min(timeout, max(0.05, self.toast_time - time.time()))
+        if self.highlight_line is not None:
+            timeout = min(timeout, max(0.05, self.highlight_until - time.monotonic()))
+        if self._progress_dirty:
+            timeout = min(timeout, max(0.05, 1.0 - (time.monotonic() - self._last_save_time)))
+        return timeout
+
     def run(self) -> None:
         """主阅读事件循环"""
         try:
@@ -339,8 +393,9 @@ class ReaderView:
 
             while True:
                 self.render()
-                key = self.term.read_key(0.5)
+                key = self.term.read_key(self._idle_timeout())
                 if not key:
+                    self._flush_progress_if_dirty()
                     continue
 
                 cols, rows = self.term.get_size()
@@ -355,13 +410,13 @@ class ReaderView:
                 elif key in ('j', KEY_DOWN):
                     if self.line_offset < max_offset:
                         self.line_offset += 1
-                        self.save_current_progress()
+                        self._mark_progress_dirty()
 
                 # 上滚单行
                 elif key in ('k', KEY_UP):
                     if self.line_offset > 0:
                         self.line_offset -= 1
-                        self.save_current_progress()
+                        self._mark_progress_dirty()
 
                 # 向下翻页 (Space / PageDown)
                 elif key == 'd':
@@ -377,24 +432,24 @@ class ReaderView:
                         # 保留 2 行上下文
                         step = max(1, content_rows - 2)
                         self.line_offset = min(max_offset, self.line_offset + step)
-                        self.save_current_progress()
+                        self._mark_progress_dirty()
 
                 # 向上翻页 (b / PageUp)
                 elif key in ('b', KEY_PGUP):
                     if self.line_offset > 0:
                         step = max(1, content_rows - 2)
                         self.line_offset = max(0, self.line_offset - step)
-                        self.save_current_progress()
+                        self._mark_progress_dirty()
 
                 # 跳到本章开头
                 elif key in ('g', KEY_HOME):
                     self.line_offset = 0
-                    self.save_current_progress()
+                    self._mark_progress_dirty()
 
                 # 跳到本章结尾
                 elif key in ('G', KEY_END):
                     self.line_offset = max_offset
-                    self.save_current_progress()
+                    self._mark_progress_dirty()
 
                 # h / l 在章节间前后移动，方向键始终只控制正文滚动。
                 elif key in ('h', '['):

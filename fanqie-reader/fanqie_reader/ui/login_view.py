@@ -27,6 +27,7 @@ class LoginView:
         self.qr_status: str = "new"  # new, scanned, confirmed, expired, error
         self.msg: str = ""
         self.last_check_time: float = 0.0
+        self._last_render_state = None
 
         if not self.auth.is_logged_in():
             self._fetch_new_qr()
@@ -48,6 +49,17 @@ class LoginView:
 
     def render(self) -> None:
         cols, rows = self.term.get_size()
+        render_state = (
+            cols,
+            rows,
+            self.mode,
+            self.qr_status,
+            self.msg,
+            self.cookie_input,
+            self.auth.is_logged_in(),
+        )
+        if self._last_render_state == render_state:
+            return
         buffer = []
         buffer.append("\033[H")
 
@@ -154,6 +166,7 @@ class LoginView:
 
         self.term.write("".join(buffer))
         self.term.flush()
+        self._last_render_state = render_state
 
     def run(self) -> bool:
         """运行登录交互，若登录状态改变或成功则返回 True"""

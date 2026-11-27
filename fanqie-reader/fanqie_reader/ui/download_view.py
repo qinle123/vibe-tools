@@ -42,6 +42,7 @@ class DownloadView:
         self.status_msg: str = ""
         self.error_msg: str = ""
         self.is_busy: bool = False
+        self._last_render_state = None
 
     def _adjust_scroll(self, list_height: int) -> None:
         if not self.results:
@@ -123,6 +124,22 @@ class DownloadView:
         cols, rows = max(1, cols), max(1, rows)
         safe_width = max(1, cols - 1)
         list_height = max(1, rows - 5)
+
+        render_state = (
+            cols,
+            rows,
+            self.query,
+            self.editing_query,
+            self.cursor_pos,
+            self.top_offset,
+            self.status_msg,
+            self.error_msg,
+            self.is_busy,
+            id(self.results),
+            len(self.results),
+        )
+        if self._last_render_state == render_state:
+            return
 
         buffer = ["\033[H"]
 
@@ -208,6 +225,7 @@ class DownloadView:
         else:
             self.term.hide_cursor()
         self.term.flush()
+        self._last_render_state = render_state
 
     def run(self) -> Optional[Tuple[Book, List[Chapter]]]:
         """运行下载引导流程，下载成功返回 (Book, Chapters)，取消返回 None"""
@@ -215,7 +233,7 @@ class DownloadView:
             self._search_sources()
             while True:
                 self.render()
-                key = self.term.read_key(0.5, text_input=self.editing_query)
+                key = self.term.read_key(2.0, text_input=self.editing_query)
                 if not key:
                     continue
 

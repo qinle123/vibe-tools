@@ -222,6 +222,27 @@ class TestReaderView(unittest.TestCase):
             reader.scroll_half_page(-1)
             self.assertEqual(reader.line_offset, 0)
 
+    def test_rapid_line_scroll_throttles_disk_writes_and_flushes_on_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StorageManager(directory)
+            book = Book("101", "测试书")
+            storage.add_to_shelf(book)
+            storage.save_chapters_meta("101", [Chapter("c1", "第一章")])
+            storage.save_chapter_cache("101", "c1", "第一章", "".join(f"第{i}段。\n" for i in range(60)))
+
+            terminal = MockTerminal(keys=["j", "j", "j", "j", "j", "q"])
+            reader = ReaderView(terminal, storage, book, [Chapter("c1", "第一章")])
+            reader._prefetch_next_chapter = MagicMock()
+
+            with patch.object(storage, "update_progress", wraps=storage.update_progress) as spy_update:
+                reader.run()
+
+            # 1 次加载章节保存 + 1 次退出时刷新，5 次连续滚行不再每次写盘
+            self.assertLessEqual(spy_update.call_count, 3)
+            saved = storage.get_shelf_item("101")
+            self.assertIsNotNone(saved)
+            self.assertEqual(saved.line_offset, 5)
+
 
 if __name__ == "__main__":
     unittest.main()

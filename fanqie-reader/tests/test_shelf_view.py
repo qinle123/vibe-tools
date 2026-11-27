@@ -176,5 +176,17 @@ class TestShelfView(unittest.TestCase):
         shelf.run()
         self.assertEqual(len(shelf.shelf_items), 3)
 
+    def test_shelf_renders_colored_origin_tags(self):
+        from fanqie_reader.ui.terminal import FG_CYAN, FG_YELLOW, RESET
+
+        self.storage.add_to_shelf(Book(book_id="local_abc123", title="本地独有书", updated_at=50.0))
+        # 光标停在第 0 行（103），第 1/2/3 行分别为非选中行，可看到各自颜色标签
+        term = MockTerminal(["q"])
+        shelf = ShelfView(term, self.mock_api, self.storage, self.mock_auth)
+        shelf.run()
+        rendered = "".join(term.output)
+        self.assertIn(f"{FG_CYAN}[番茄]{RESET}", rendered)
+        self.assertIn(f"{FG_YELLOW}[本地]{RESET}", rendered)
+
 if __name__ == "__main__":
     unittest.main()

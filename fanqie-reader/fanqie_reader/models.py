@@ -91,6 +91,13 @@ class ShelfItem:
     line_offset: int = 0
     last_read_time: float = field(default_factory=time.time)
     added_at: float = 0.0
+    in_cloud_shelf: Optional[bool] = None
+
+    def is_cloud_book(self) -> bool:
+        """判断是否属于番茄账号云端书架书籍（否则为本地独有）。"""
+        if self.in_cloud_shelf is not None:
+            return self.in_cloud_shelf
+        return not self.book.book_id.startswith("local_")
 
     def progress_percent(self) -> float:
         if self.book.chapter_total <= 0:
@@ -98,7 +105,7 @@ class ShelfItem:
         return min(100.0, max(0.0, ((self.last_chapter_index + 1) / self.book.chapter_total) * 100))
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "book": self.book.to_dict(),
             "last_chapter_index": self.last_chapter_index,
             "last_chapter_id": self.last_chapter_id,
@@ -107,9 +114,13 @@ class ShelfItem:
             "last_read_time": self.last_read_time,
             "added_at": self.added_at,
         }
+        if self.in_cloud_shelf is not None:
+            data["in_cloud_shelf"] = self.in_cloud_shelf
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ShelfItem:
+        raw_cloud = data.get("in_cloud_shelf")
         return cls(
             book=Book.from_dict(data.get("book", {})),
             last_chapter_index=int(data.get("last_chapter_index", 0)),
@@ -118,4 +129,5 @@ class ShelfItem:
             line_offset=int(data.get("line_offset", 0)),
             last_read_time=float(data.get("last_read_time", time.time())),
             added_at=float(data.get("added_at", 0.0)),
+            in_cloud_shelf=None if raw_cloud is None else bool(raw_cloud),
         )

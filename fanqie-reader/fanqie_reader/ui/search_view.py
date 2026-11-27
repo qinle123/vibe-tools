@@ -41,6 +41,7 @@ class SearchView:
         self.toast_time: float = 0.0
 
         self.focus: str = "input"
+        self._last_render_state = None
 
         if initial_query:
             self._do_search()
@@ -155,6 +156,24 @@ class SearchView:
         safe_width = max(1, cols - 1)
         # 固定行: 标题(1) + 搜索栏(1) + 上分隔线(1) + 下分隔线(1) + 预览(2) + 底栏(1) = 7
         list_height = max(1, rows - 7)
+
+        active_toast = self.toast_msg if (self.toast_msg and time.time() < self.toast_time) else ""
+        render_state = (
+            cols,
+            rows,
+            self.query,
+            self.focus,
+            self.cursor_pos,
+            self.top_offset,
+            self.is_searching,
+            self.search_status,
+            self.error_msg,
+            active_toast,
+            id(self.results),
+            len(self.results),
+        )
+        if self._last_render_state == render_state:
+            return
 
         buffer = ["\033[H"]
 
@@ -273,13 +292,17 @@ class SearchView:
         else:
             self.term.hide_cursor()
         self.term.flush()
+        self._last_render_state = render_state
 
     def run(self) -> Optional[Book]:
         """运行搜索循环，若用户选中下载并开读则返回 Book 对象，否则返回 None"""
         try:
             while True:
                 self.render()
-                key = self.term.read_key(0.5, text_input=self.focus == "input")
+                timeout = 2.0
+                if self.toast_msg and time.time() < self.toast_time:
+                    timeout = max(0.05, min(0.5, self.toast_time - time.time()))
+                key = self.term.read_key(timeout, text_input=self.focus == "input")
                 if not key:
                     continue
 

@@ -31,6 +31,7 @@ class TOCView:
             self.cursor_pos = self.filtered_indices.index(current_index)
         
         self.top_offset: int = 0
+        self._last_render_state = None
 
     def _update_filter(self) -> None:
         if not self.filter_text.strip():
@@ -58,6 +59,19 @@ class TOCView:
         cols, rows = max(1, cols), max(1, rows)
         safe_width = max(1, cols - 1)
         list_height = max(1, rows - 4)
+
+        render_state = (
+            cols,
+            rows,
+            self.cursor_pos,
+            self.top_offset,
+            self.filter_text,
+            self.filter_mode,
+            self.current_index,
+            len(self.filtered_indices),
+        )
+        if self._last_render_state == render_state:
+            return
 
         buffer = ["\033[H"]
 
@@ -115,6 +129,7 @@ class TOCView:
 
         self.term.write("".join(buffer))
         self.term.flush()
+        self._last_render_state = render_state
 
     def run(self) -> Optional[int]:
         """运行目录选择循环，返回目标章节索引或 None"""
@@ -122,7 +137,7 @@ class TOCView:
 
         while True:
             self.render()
-            key = self.term.read_key(0.5, text_input=self.filter_mode)
+            key = self.term.read_key(2.0, text_input=self.filter_mode)
             if not key:
                 continue
 
