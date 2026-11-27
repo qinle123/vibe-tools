@@ -33,6 +33,27 @@ class TestTerminal(unittest.TestCase):
     def test_navigation_mode_preserves_repeated_vim_keys(self):
         self.assertEqual(self._read_keys(b"jkl", 3), ["j", "k", "l"])
 
+    def test_sigwinch_wakes_read_key_immediately(self):
+        import signal
+        import threading
+        import time
+
+        master, slave = pty.openpty()
+        try:
+            tty.setcbreak(slave)
+            with os.fdopen(slave, "r", encoding="utf-8") as stdin:
+                with patch.object(sys, "stdin", stdin):
+                    term = TerminalApp()
+                    threading.Timer(0.05, lambda: term._on_sigwinch(signal.SIGWINCH, None)).start()
+                    start = time.monotonic()
+                    res = term.read_key(5.0)
+                    elapsed = time.monotonic() - start
+                    self.assertIsNone(res)
+                    self.assertEqual(term.winch_epoch, 1)
+                    self.assertLess(elapsed, 0.5)
+        finally:
+            os.close(master)
+
 
 if __name__ == "__main__":
     unittest.main()

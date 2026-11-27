@@ -52,6 +52,7 @@ class LoginView:
         render_state = (
             cols,
             rows,
+            getattr(self.term, "winch_epoch", 0),
             self.mode,
             self.qr_status,
             self.msg,

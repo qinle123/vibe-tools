@@ -59,6 +59,7 @@ class ReaderView:
         self._last_frame = None
         self._last_frame_size = None
         self._last_render_state = None
+        self._last_winch_epoch: int = getattr(term, "winch_epoch", 0)
         self.loading: bool = False
         self.toast_message: str = ""
         self.toast_time: float = 0.0
@@ -254,9 +255,14 @@ class ReaderView:
         active_toast = self.toast_message if (self.toast_message and now_wall < self.toast_time) else ""
         in_shelf = self.storage.is_in_shelf(self.book.book_id)
         clock_str = time.strftime('%H:%M')
+        winch_epoch = getattr(self.term, "winch_epoch", 0)
+        if winch_epoch != self._last_winch_epoch:
+            self._last_frame = None
+            self._last_winch_epoch = winch_epoch
         render_state = (
             cols,
             rows,
+            winch_epoch,
             self.loading,
             self.line_offset,
             self.chapter_index,

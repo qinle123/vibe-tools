@@ -63,6 +63,7 @@ class TOCView:
         render_state = (
             cols,
             rows,
+            getattr(self.term, "winch_epoch", 0),
             self.cursor_pos,
             self.top_offset,
             self.filter_text,

@@ -161,6 +161,7 @@ class SearchView:
         render_state = (
             cols,
             rows,
+            getattr(self.term, "winch_epoch", 0),
             self.query,
             self.focus,
             self.cursor_pos,

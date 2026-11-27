@@ -128,6 +128,7 @@ class DownloadView:
         render_state = (
             cols,
             rows,
+            getattr(self.term, "winch_epoch", 0),
             self.query,
             self.editing_query,
             self.cursor_pos,

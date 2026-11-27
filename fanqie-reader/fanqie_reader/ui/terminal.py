@@ -62,8 +62,22 @@ class TerminalApp:
         self.old_termios = None
         self._is_raw = False
         self.winch_callback: Optional[Callable[[], None]] = None
+        self.winch_epoch: int = 0
         self._char_buffer = deque()
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._winch_pipe_r, self._winch_pipe_w = os.pipe()
+        os.set_blocking(self._winch_pipe_r, False)
+        os.set_blocking(self._winch_pipe_w, False)
+
+    def __del__(self):
+        for fd_attr in ("_winch_pipe_r", "_winch_pipe_w"):
+            fd = getattr(self, fd_attr, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, fd_attr, None)
 
     def enter_raw_mode(self) -> None:
         if not sys.stdin.isatty():
@@ -88,23 +102,48 @@ class TerminalApp:
             self._is_raw = False
 
     def _on_sigwinch(self, signum, frame):
+        self.winch_epoch += 1
+        if self._winch_pipe_w is not None:
+            try:
+                os.write(self._winch_pipe_w, b"\x00")
+            except OSError:
+                pass
         if self.winch_callback:
             self.winch_callback()
+
+    def _drain_winch_pipe(self) -> None:
+        if self._winch_pipe_r is None:
+            return
+        while True:
+            try:
+                if not os.read(self._winch_pipe_r, 1024):
+                    break
+            except OSError:
+                break
 
     def get_size(self) -> Tuple[int, int]:
         """返回 (cols, rows)"""
         size = shutil.get_terminal_size((80, 24))
         return size.columns, size.lines
 
-    def _read_char(self, timeout: Optional[float]) -> Optional[str]:
+    def _read_char(self, timeout: Optional[float], *, break_on_winch: bool = False) -> Optional[str]:
         """只读文件描述符；select 看不到 TextIOWrapper 预读的内容。"""
         deadline = None if timeout is None else time.monotonic() + timeout
         while not self._char_buffer:
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
             fd = sys.stdin.fileno()
-            ready, _, _ = select.select([fd], [], [], remaining)
+            watch_fds = [fd]
+            if self._winch_pipe_r is not None:
+                watch_fds.append(self._winch_pipe_r)
+            ready, _, _ = select.select(watch_fds, [], [], remaining)
             if not ready:
                 return None
+            if self._winch_pipe_r is not None and self._winch_pipe_r in ready:
+                self._drain_winch_pipe()
+                if break_on_winch and fd not in ready:
+                    return None
+            if fd not in ready:
+                continue
             data = os.read(fd, 4096)
             if not data:
                 return None
@@ -145,7 +184,9 @@ class TerminalApp:
         return None
 
     def _read_key_event(self, timeout: Optional[float]) -> Optional[str]:
-        char = self._read_char(timeout)
+        char = self._read_char(timeout, break_on_winch=True)
+        if char is None:
+            return None
         if char == '\x1b':
             return self._read_escape_key()
         return {

@@ -131,6 +131,7 @@ class ShelfView:
         render_state = (
             cols,
             rows,
+            getattr(self.term, "winch_epoch", 0),
             self._shelf_version,
             self.cursor_pos,
             self.top_offset,
